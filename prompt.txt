@@ -1,0 +1,102 @@
+Comply with these program modification standards:
+
+Modification File Format
+
+MMM function_name MMM
+arg1
+@@@@@@
+arg2
+@@@@@@
+arg3
+
+MMM another_function MMM
+arg1
+@@@@@@
+arg2
+
+Available Modification Functions
+
+Meta Operations
+
+MMM modification_description MMM
+Text to append to the git commit message describing the purpose of the modification(s).
+
+File Operations
+
+create_file(file_path, file_content, make_executable=True)
+move_file(src, dst)
+make_directory(path)
+remove_file(path, recursive=False)
+replace_file_contents(path, file_content)
+
+Code Modifications
+
+declare(file_path, target_path, new_code)
+    Declare a function, class, or assignment in a file with code using lexical chain support.
+    If the target_path exists one or more times, replace all with the new declaration.
+    target_path: Use dot notation for nested items (e.g., "ClassName.method_name")
+
+update_declaration(file_path, target_path, new_code)
+    The same as declare(file_path, target_path, new_code)
+
+remove_declaration(file_path, target_path)
+
+update_header(file_path, new_code)
+    new_code replaces the module header: all lines up to the first declaration (def or class).
+
+Natural-Language Modification Instructions Are Prohibited
+    Modification descriptions must NOT elide original content with natural language instructions such as:
+        "rest unchanged", "keep the rest the same", "existing code goes here" 
+        "leave everything else intact", etc.
+
+Example Modification File
+
+MMM modification_description MMM
+Fix file processing.
+(was absent and potentially problematic under failures.)
+MMM declare MMM
+app.py
+@@@@@@
+DataProcessor.process_file
+@@@@@@
+def process_file(self, filepath):
+    with open(filepath, 'r') as f:
+        data = f.read()
+    return self.transform(data)
+
+MMM create_file MMM
+run_tests.sh
+@@@@@@
+#!/bin/bash
+python -m pytest tests/
+@@@@@@
+True
+MMM modification_descrption MMM
+Stub out unit directory for future unit tests.
+Empty for now though.
+MMM make_directory MMM
+tests/unit
+
+If a function is nearing 100 lines long, divide it into lexically subordinate functions.
+
+Programming heuristics:
+Assume this is a blank piece of paper" development project constrained only by required libraries:
+1) No "legacy code" adapters.  
+1.1) If an api changes, change everything that references it.
+1.2) If file artifacts change, maintain functionality with one-time throw-away migration scripts.
+2) No "fallbacks" permitted.  Conditionals should not even feel like "fallbacks".
+3) If you can't resist the temptation to use except:, it must re-raise if the log level is DEBUG
+
+Provide these directives in a code section of the chat panel.
+
+Only change symbol names when behavior changes
+Unless otherwise specified, provide tracebacks from except: blocks.
+In particular, avoid superfluous modifiers, e.g. "improved", "optimized", "comprehensive"
+Divide code into separate files for minimal context updates
+Create subdirectories according to best practices for separation of concerns, data and results.
+
+Present modification directives in a single code block.
+
+When you have understood these standards reply with:
+
+I understand and in particular will not multiply symbols beyond necessity.  What is my programming task?
