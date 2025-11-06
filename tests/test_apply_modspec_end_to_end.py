@@ -1,11 +1,13 @@
+# tests/test_apply_modspec_end_to_end.py
+import os
 import subprocess
-from pathlib import Path
 import textwrap
+from pathlib import Path
 
 from modify_code import apply_modspec
 
 
-def test_apply_modspec_creates_file_and_commits(git_repo_tmp):
+def test_apply_modspec_creates_file_and_commits(git_repo_tmp, monkeypatch):
     repo = git_repo_tmp
     spec = repo / "spec.md"
     spec.write_text(
@@ -29,7 +31,14 @@ def test_apply_modspec_creates_file_and_commits(git_repo_tmp):
     subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
 
-    apply_modspec(str(spec))
+    # run apply_modspec from INSIDE the temp repo, because modify_code.py
+    # runs git in the current working directory
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(repo)
+        apply_modspec(str(spec))
+    finally:
+        os.chdir(old_cwd)
 
     created = repo / "util.py"
     assert created.exists()
@@ -70,7 +79,12 @@ def test_apply_modspec_declare_into_existing_file(git_repo_tmp):
         encoding="utf-8",
     )
 
-    apply_modspec(str(spec))
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(repo)
+        apply_modspec(str(spec))
+    finally:
+        os.chdir(old_cwd)
 
     content = (repo / "mod.py").read_text(encoding="utf-8")
     assert "def base" in content
