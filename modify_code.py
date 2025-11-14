@@ -77,6 +77,8 @@ def parse_bool(s: str) -> bool:
 
 def resolve(cmd: str, sections: list[str]):
     arity = len(sections)
+    print(cmd)
+    print(sections[0])
     if cmd == 'modification_description':
         if arity != 1:
             raise ValueError(f"{cmd} requires arity 1")
@@ -86,7 +88,10 @@ def resolve(cmd: str, sections: list[str]):
             raise ValueError(f"{cmd} requires arity 2-3")
         path = sections[0].strip()
         content = sections[1]
-        make_exec = parse_bool(sections[2].strip()) if arity == 3 else False
+        make_exec = False
+        if arity == 3:
+            sections[2] = sections[2].strip()
+            make_exec = sections[2] if sections[2] != '' else False
         return [path, content, make_exec]
     elif cmd == 'move_file':
         if arity != 2:
