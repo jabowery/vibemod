@@ -76,6 +76,10 @@ def parse_bool(s: str) -> bool:
 
 
 def resolve(cmd: str, sections: list[str]):
+    last_section = sections[-1]
+    if last_section.strip()=='': 
+        # This detects the tendency for LLMs to place a @@@@@@ at the end of a directive
+        sections=sections[:-1] # drop trailing pure whitespace arguments
     arity = len(sections)
     print(cmd)
     print(sections[0])
