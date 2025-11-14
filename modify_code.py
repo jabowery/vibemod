@@ -96,6 +96,8 @@ def resolve(cmd: str, sections: list[str]):
         if arity == 3:
             sections[2] = sections[2].strip()
             make_exec = sections[2] if sections[2] != '' else False
+            make_exec = True if str(make_exec).lower() == 'true' else make_exec
+            make_exec = False if str(make_exec).lower() == 'false' else make_exec
         return [path, content, make_exec]
     elif cmd == 'move_file':
         if arity != 2:
