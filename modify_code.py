@@ -4,7 +4,7 @@ import re
 import shutil
 import sys
 import subprocess
-
+import textwrap
 
 def run_git(cmd, check=True):
     result = subprocess.run(['git'] + cmd, capture_output=True, text=True)
@@ -77,7 +77,14 @@ def parse_bool(s: str) -> bool:
 
 def resolve(cmd: str, sections: list[str]):
     last_section = sections[-1]
-    if last_section.strip()=='': 
+    lsStripped = last_section.strip()
+    if (
+            lsStripped=='' 
+        or 
+                lsStripped.lower() == "false" 
+            and 
+                not(cmd in ['create_file', 'replace_file_contents'])
+        ):
         # This detects the tendency for LLMs to place a @@@@@@ at the end of a directive
         sections=sections[:-1] # drop trailing pure whitespace arguments
     arity = len(sections)
@@ -208,6 +215,8 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
     name = parts[-1]
     new_node = None
     if not remove:
+        # Dedent the content to handle indented inputs (e.g., methods).
+        content = textwrap.dedent(content)
         try:
             content_module = ast.parse(content)
         except SyntaxError as e:
@@ -253,7 +262,6 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(new_source + '\n')
 
-
 def execute(cmd: str, args):
     if cmd == 'modification_description':
         pass  # Descriptive, no action
@@ -269,7 +277,7 @@ def execute(cmd: str, args):
         shutil.move(src, dst)
     elif cmd == 'make_directory':
         path = args[0]
-        os.makedirs(path)
+        os.makedirs(path, exist_ok=True)
     elif cmd == 'remove_file':
         path = args[0]
         if os.path.isdir(path):
