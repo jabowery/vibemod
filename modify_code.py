@@ -211,10 +211,10 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
 
             def get_import_key(node: ast.AST) -> tuple:
                 if isinstance(node, ast.Import):
-                    return ('import', tuple(sorted(((alias.name, alias.asname) for alias in node.names))))
+                    return ('import', tuple(sorted(((alias.name, alias.asname or '') for alias in node.names))))
                 elif isinstance(node, ast.ImportFrom):
                     module = node.module or ''
-                    return ('from', module, tuple(sorted(((alias.name, alias.asname) for alias in node.names))))
+                    return ('from', module, tuple(sorted(((alias.name, alias.asname or '') for alias in node.names))))
                 return None
             existing_keys = {get_import_key(node) for node in tree.body if get_import_key(node) is not None}
             insert_idx = 0
