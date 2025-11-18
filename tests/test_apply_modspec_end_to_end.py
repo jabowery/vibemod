@@ -4,7 +4,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from modify_code import apply_modspec
+from vibemod.modify_code import apply_modspec
 
 
 def test_apply_modspec_creates_file_and_commits(git_repo_tmp, monkeypatch):

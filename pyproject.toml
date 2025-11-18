@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vibemod"
+version = "0.1.0"
+description = "LLM-friendly code modification engine using MMM directives"
+authors = [
+  { name = "James Bowery" }
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+]
+
+[project.scripts]
+vibemod-apply = "vibemod.cli:main"

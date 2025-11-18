@@ -1,6 +1,6 @@
 import pytest
 
-from modify_code import resolve, parse_bool, is_valid_dotted
+from vibemod.modify_code import resolve, parse_bool, is_valid_dotted
 
 
 def test_parse_bool_invalid():

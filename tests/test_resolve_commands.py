@@ -1,6 +1,6 @@
 import pytest
 
-from modify_code import resolve
+from vibemod.modify_code import resolve
 
 
 def test_resolve_modification_description():

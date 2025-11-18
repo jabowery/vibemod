@@ -1,0 +1,57 @@
+# =====================================================================
+# vibemodagent configuration for this repository
+# =====================================================================
+
+[branch]
+# Branch where LLM-driven MMM modifications are applied.
+# The agent will ensure this branch exists and is checked out.
+llm = "llm-dev"
+
+
+# =====================================================================
+# Environment configuration
+# =====================================================================
+
+[env]
+# How to run tests in this repository:
+#
+#   type = "mamba"  -> use mamba env and environment.yml
+#   type = "venv"   -> test.command should point to the venv binary
+#   type = "none"   -> run test.command directly in current Python env
+#
+type = "mamba"
+
+# Name of the mamba environment for this project.
+# This is the environment the agent will run tests inside.
+name = "vibemod"
+
+# Path to the project's environment.yml (relative to repo root).
+# Used only when type = "mamba".
+environment_yml = "environment.yml"
+
+# Whether the agent should automatically run:
+#     mamba env update -n <name> -f <environment_yml> --prune
+# before testing. Highly recommended for reproducibility.
+auto_update = true
+
+
+# =====================================================================
+# Testing configuration
+# =====================================================================
+
+[test]
+# Command to run tests *inside the environment*.
+# For mamba, vibemodagent will wrap this as:
+#
+#   mamba run -n <env.name> <test.command>
+#
+command = "pytest --maxfail=1 --disable-warnings"
+
+
+# =====================================================================
+# vibemod-specific configuration (optional future expansion)
+# =====================================================================
+
+[vibemod]
+# Reserved for future use by vibemodagent or vibemod
+# (e.g., patch style, strictness, logging control)

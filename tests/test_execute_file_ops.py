@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from modify_code import execute
+from vibemod.modify_code import execute
 
 
 def test_execute_create_file(tmp_path):

@@ -3,7 +3,7 @@ import textwrap
 
 import pytest
 
-from modify_code import parse, resolve
+from vibemod.modify_code import parse, resolve
 
 
 # ───────────────────────────── parse-level tests ─────────────────────────────

@@ -2,7 +2,7 @@ import ast
 import textwrap
 from pathlib import Path
 
-from modify_code import modify_declaration
+from vibemod.modify_code import modify_declaration
 
 
 def test_modify_declaration_inserts_new_function(tmp_path):
