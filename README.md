@@ -2,25 +2,17 @@
 
 See [prompt.txt](prompt.txt) that prompts the LLM coding assistant to provide modification directives.
 
-Given a modification directives file named "fixes.txt":
-
-```
-(vibemod) $ python path_to/vibemod/modify_code.py fixes.txt
-```
-
-The (vibemod) indicates you have already:
-
-```
-cd vibemod
-$ mamba env create -f environment.yml
-$ mamba activate vibemod
-```
-
-Also:
+This tool requires you to work in a git repository:
 ```
 $ git init .
 $ git commit -m 'initial commit'
 ```
+After installing this package, given a modification directives file named "fixes.txt":
+
+```
+(yourenvironment) $ vibemod-apply fixes.txt
+```
+
 # What's all this about?
 
 Primarily for people using the el cheapo ($20/mo) LLMs to do vibe coding in Python*...
