@@ -32,7 +32,7 @@ environment_yml = "environment.yml"
 # Whether the agent should automatically run:
 #     mamba env update -n <name> -f <environment_yml> --prune
 # before testing. Highly recommended for reproducibility.
-auto_update = true
+auto_update = false
 
 
 # =====================================================================

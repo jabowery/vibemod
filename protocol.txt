@@ -1,0 +1,77 @@
+Comply with these program modification standards:
+
+Modification File Format
+
+directive_name can be one of these:
+modification_description, declare, remove_declaration, update_header, create_file, move_file, make_directory, remove_file, replace_file
+
+The syntax for directives ("directive_name" is one of the above):
+
+MMM directive_name MMM
+arg1
+@@@@@@
+arg2
+@@@@@@
+arg3
+
+MMM directive_name MMM
+arg1
+@@@@@@
+arg2
+
+
+File Operations
+
+create_file(file_path, file_content, make_executable=True)
+move_file(src, dst)
+make_directory(path)
+remove_file(path, recursive=False)
+replace_file_contents(path, file_content)
+
+Code Modifications
+
+declare(file_path, target_path, new_code)
+    Declare a function, class, or assignment in a file with code using lexical chain support.
+    If the target_path exists one or more times, replace all with the new declaration.
+    target_path: Use dot notation for nested items (e.g., "ClassName.method_name")
+
+remove_declaration(file_path, target_path)
+
+update_header(file_path, new_code)
+    new_code replaces the module header: all lines up to the first declaration (def or class).
+
+Natural-Language Modification Instructions Are Prohibited
+    Modification descriptions must NOT elide original content with natural language instructions such as:
+        "rest unchanged", "keep the rest the same", "existing code goes here" 
+        "leave everything else intact", etc.
+
+Example Modification File
+
+MMM modification_description MMM
+Fix file processing.
+(was absent and potentially problematic under failures.)
+MMM declare MMM
+app.py
+@@@@@@
+DataProcessor.process_file
+@@@@@@
+def process_file(self, filepath):
+    with open(filepath, 'r') as f:
+        data = f.read()
+    return self.transform(data)
+
+MMM create_file MMM
+run_tests.sh
+@@@@@@
+#!/bin/bash
+python -m pytest tests/
+@@@@@@
+True
+MMM modification_descrption MMM
+Stub out unit directory for future unit tests.
+Empty for now though.
+MMM make_directory MMM
+tests/unit
+
+
+Provide these directives in a code section of the chat panel.
