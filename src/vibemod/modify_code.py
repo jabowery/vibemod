@@ -185,7 +185,9 @@ def canonicalize_command(block: CommandBlock) -> List[Tuple[str, List[Any]]]:
     
     # Handle quirks for specific commands: if first section splits to !=1, flatten to args
     # (for commands where first arg is single word like path)
-    quirk_commands = ['create_file', 'replace_file_contents', 'move_file', 'make_directory', 
+    quirk_commands = ['create_file', 'replace_file_contents', 
+                      'update_file', 'replace_file', 'replace_file_contents',
+                      'move_file', 'make_directory', 
                       'remove_file', 'declare', 'update_declaration', 'remove_declaration']
     if cmd in quirk_commands:
         section0list = sections[0].split()
@@ -198,7 +200,7 @@ def canonicalize_command(block: CommandBlock) -> List[Tuple[str, List[Any]]]:
             arity -= 1
     
     # create_file (canonical; replace_file_contents permitted): path, content, [make_exec=False]
-    if cmd in ['create_file', 'replace_file_contents']:
+    if cmd in ['create_file', 'replace_file_contents', 'update_file', 'replace_file', 'replace_file_contents']:
         if arity < 2 or arity > 3:
             raise ValueError(f'{cmd} requires 2 or 3 arguments but got {arity}')
         
