@@ -326,6 +326,19 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
     except SyntaxError as e:
         raise ValueError(f'AST parse error in {file_path}') from e
     
+    # Find the header boundary BEFORE modifying the tree
+    # (to preserve comments and original formatting)
+    original_lines = source.splitlines(keepends=True)
+    original_decl_nodes = [
+        node for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    
+    header_end_line = 0  # Line index where declarations start
+    if original_decl_nodes:
+        first_decl_lineno = min(node.lineno for node in original_decl_nodes)
+        header_end_line = first_decl_lineno - 1
+    
     parts = dotted_target.split('.')
     if not parts:
         raise ValueError('Invalid dotted_target')
@@ -422,10 +435,36 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
         
         body_to_modify.insert(pos, new_node)
     
-    # Write back
-    new_source = ast.unparse(tree)
+    # Write back, preserving header (everything before first declaration in original)
+    if header_end_line > 0:
+        header = ''.join(original_lines[:header_end_line])
+        
+        # Unparse the modified tree
+        new_source = ast.unparse(tree)
+        new_lines = new_source.splitlines(keepends=True)
+        
+        # Find where declarations start in unparsed output
+        new_tree = ast.parse(new_source)
+        new_decl_nodes = [
+            node for node in new_tree.body
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        
+        if new_decl_nodes:
+            new_first_decl_lineno = min(node.lineno for node in new_decl_nodes)
+            # Combine original header with unparsed declarations
+            decls_part = ''.join(new_lines[new_first_decl_lineno - 1:])
+            final_source = header + decls_part
+        else:
+            # No declarations in result, just use header
+            final_source = header
+    else:
+        # No header to preserve, just unparse
+        final_source = ast.unparse(tree) + '\n'
+    
     with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(new_source + '\n')
+        f.write(final_source)
+
 
 
 def execute_canonical(cmd: str, modargs: List[Any]):
