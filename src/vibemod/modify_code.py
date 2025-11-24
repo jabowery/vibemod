@@ -68,7 +68,8 @@ def extract_command_blocks(file_content: str) -> List[CommandBlock]:
     Extract command blocks using permissive grammar.
     
     Grammar:
-        File := CommandBlock+
+        File := [LeadingDescription]? CommandBlock*
+        LeadingDescription := <text_until_first_command>  # Auto-wrapped as modification_description
         CommandBlock := Command Argument*
         Command := "MMM" <identifier> "MMM"
         Argument := <text_until_separator_or_next_command>
@@ -83,7 +84,21 @@ def extract_command_blocks(file_content: str) -> List[CommandBlock]:
     
     header_re = re.compile(r'^\s*MMM\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+MMM\s*$')
     
+    # Capture leading text as modification_description if present
     i = 0
+    leading_lines: List[str] = []
+    while i < len(lines):
+        line = lines[i]
+        if header_re.match(line):
+            break
+        leading_lines.append(line)
+        i += 1
+    
+    if leading_lines:
+        leading_text = ''.join(leading_lines)
+        blocks.append(CommandBlock(command='modification_description', arguments=[leading_text]))
+    
+    # Now process remaining command blocks
     while i < len(lines):
         line = lines[i]
         m = header_re.match(line)
@@ -141,33 +156,48 @@ def parse_bool(s: str) -> bool:
     raise ValueError(f'Invalid boolean: {s!r}')
 
 
-def canonicalize_command(block: CommandBlock) -> Tuple[str, List[Any]]:
+def is_decl(node):
+    return isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+
+
+def canonicalize_command(block: CommandBlock) -> List[Tuple[str, List[Any]]]:
     """
-    Transform a CommandBlock into canonical form (command, modargs).
+    Transform a CommandBlock into canonical form(s) (command, modargs).
     
     This is the "permissive grammar" that accepts various arities and
     transforms them into the canonical form expected by execute().
     
-    Returns: (command_name, canonical_modargs)
+    For update_header, may return multiple commands: update_header + declare(s).
+    
+    Returns: List of (command_name, canonical_modargs)
     """
     cmd = block.command
     sections = block.arguments
     arity = len(sections)
     
+    commands: List[Tuple[str, List[Any]]] = []
+    
     # modification_description: 1 argument (description text)
     if cmd == 'modification_description':
         if arity != 1:
             raise ValueError(f'{cmd} requires exactly 1 argument but got {arity}')
-        return (cmd, [sections[0]])
-    section0list = sections[0].split()
-    if len(section0list)!=1:
-        section0list.extend(sections[1:])
-        sections = section0list
-        arity += 1
-    if sections[-1].strip()=='':
-        sections = sections[:-1]
-        arity -= 1
-    # create_file, replace_file_contents: path, content, [make_exec=False]
+        return [(cmd, [sections[0]])]
+    
+    # Handle quirks for specific commands: if first section splits to !=1, flatten to args
+    # (for commands where first arg is single word like path)
+    quirk_commands = ['create_file', 'replace_file_contents', 'move_file', 'make_directory', 
+                      'remove_file', 'declare', 'update_declaration', 'remove_declaration']
+    if cmd in quirk_commands:
+        section0list = sections[0].split()
+        if len(section0list) != 1:
+            section0list.extend(sections[1:])
+            sections = section0list
+            arity = len(sections)
+        if sections and sections[-1].strip() == '':
+            sections = sections[:-1]
+            arity -= 1
+    
+    # create_file (canonical; replace_file_contents permitted): path, content, [make_exec=False]
     if cmd in ['create_file', 'replace_file_contents']:
         if arity < 2 or arity > 3:
             raise ValueError(f'{cmd} requires 2 or 3 arguments but got {arity}')
@@ -180,19 +210,19 @@ def canonicalize_command(block: CommandBlock) -> Tuple[str, List[Any]]:
             flag_str = sections[2].strip()
             make_exec = parse_bool(flag_str)
         
-        return (cmd, [path, content, make_exec])
+        return [('create_file', [path, content, make_exec])]
     
     # move_file: src, dst
     elif cmd == 'move_file':
         if arity != 2:
             raise ValueError(f'{cmd} requires exactly 2 arguments but got {arity}')
-        return (cmd, [sections[0].strip(), sections[1].strip()])
+        return [(cmd, [sections[0].strip(), sections[1].strip()])]
     
     # make_directory: path
     elif cmd == 'make_directory':
         if arity != 1:
             raise ValueError(f'{cmd} requires exactly 1 argument but got {arity}')
-        return (cmd, [sections[0].strip()])
+        return [(cmd, [sections[0].strip()])]
     
     # remove_file: path, [recursive=False]
     elif cmd == 'remove_file':
@@ -205,31 +235,55 @@ def canonicalize_command(block: CommandBlock) -> Tuple[str, List[Any]]:
         if arity == 2:
             recursive = parse_bool(sections[1])
         
-        return (cmd, [path, recursive])
+        return [(cmd, [path, recursive])]
     
-    # update_header: file_path, new_code
+    # update_header: file_path, new_code (permissive: may include subsequent declarations)
     elif cmd == 'update_header':
         if arity != 2:
             raise ValueError(f'{cmd} requires exactly 2 arguments but got {arity}')
-        return (cmd, [sections[0].strip(), sections[1]])
+        
+        path = sections[0].strip()
+        content = textwrap.dedent(sections[1])
+        lines = content.splitlines(keepends=True)
+        
+        subcommands = []
+        try:
+            tree = ast.parse(content)
+            decl_nodes = [n for n in tree.body if is_decl(n)]
+            if decl_nodes:
+                decl_nodes.sort(key=lambda n: n.lineno)
+                first_decl = decl_nodes[0]
+                first_line = first_decl.lineno - 1
+                header_str = ''.join(lines[:first_line])
+                if header_str.strip():
+                    subcommands.append(('update_header', [path, header_str]))
+                
+                for decl in decl_nodes:
+                    start_line = decl.lineno - 1
+                    end_line = decl.end_lineno
+                    decl_str = ''.join(lines[start_line:end_line])
+                    target = decl.name
+                    subcommands.append(('declare', [path, target, decl_str]))
+            else:
+                # No declarations, whole content is header
+                subcommands.append(('update_header', [path, content]))
+        except SyntaxError:
+            # Invalid Python syntax, treat whole as header (e.g., comments only)
+            subcommands.append(('update_header', [path, content]))
+        
+        return subcommands
     
-    # declare: file_path, target_path, new_code
-    elif cmd == 'declare':
+    # declare (canonical; update_declaration permitted): file_path, target_path, new_code
+    elif cmd in ['declare', 'update_declaration']:
         if arity != 3:
             raise ValueError(f'{cmd} requires exactly 3 arguments but got {arity}')
-        return (cmd, [sections[0].strip(), sections[1].strip(), sections[2]])
-    
-    # update_declaration: file_path, target_path, new_code
-    elif cmd == 'update_declaration':
-        if arity != 3:
-            raise ValueError(f'{cmd} requires exactly 3 arguments but got {arity}')
-        return (cmd, [sections[0].strip(), sections[1].strip(), sections[2]])
+        return [('declare', [sections[0].strip(), sections[1].strip(), sections[2]])]
     
     # remove_declaration: file_path, target_path
     elif cmd == 'remove_declaration':
         if arity != 2:
             raise ValueError(f'{cmd} requires exactly 2 arguments but got {arity}')
-        return (cmd, [sections[0].strip(), sections[1].strip()])
+        return [(cmd, [sections[0].strip(), sections[1].strip()])]
     
     else:
         raise ValueError(f'Unknown command: {cmd}')
@@ -379,16 +433,14 @@ def execute_canonical(cmd: str, modargs: List[Any]):
     Execute a command in canonical form.
     
     All commands must be in their canonical form at this point:
+    - modification_description(description)
     - create_file(path, content, make_exec)
-    - replace_file_contents(path, content, make_exec)
     - move_file(src, dst)
     - make_directory(path)
     - remove_file(path, recursive)
-    - update_header(file_path, new_code)
+    - update_header(file_path, new_code)  # new_code is header only (up to first declaration)
     - declare(file_path, target_path, new_code)
-    - update_declaration(file_path, target_path, new_code)
     - remove_declaration(file_path, target_path)
-    - modification_description(description)
     """
     print(cmd)
 #    print(modargs)
@@ -396,7 +448,7 @@ def execute_canonical(cmd: str, modargs: List[Any]):
         # No-op: descriptions are collected separately
         return
     
-    elif cmd in ['create_file', 'replace_file_contents']:
+    elif cmd == 'create_file':
         path, content, make_exec = modargs
         with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -461,7 +513,7 @@ def execute_canonical(cmd: str, modargs: List[Any]):
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
     
-    elif cmd in ['declare', 'update_declaration']:
+    elif cmd == 'declare':
         file_path, dotted_target, content = modargs
         modify_declaration(file_path, dotted_target, content, remove=False)
     
@@ -479,8 +531,8 @@ def execute_canonical(cmd: str, modargs: List[Any]):
 
 def get_touched_files(cmd: str, modargs: List[Any]) -> List[str]:
     """Return list of files touched by this command."""
-    if cmd in ['create_file', 'replace_file_contents', 'make_directory', 
-               'remove_file', 'update_header', 'declare', 'update_declaration', 
+    if cmd in ['create_file', 'make_directory', 
+               'remove_file', 'update_header', 'declare', 
                'remove_declaration']:
         return [modargs[0]]
     elif cmd == 'move_file':
@@ -504,10 +556,9 @@ def apply_modspec(spec_file: str):
     blocks = extract_command_blocks(content)
     
     # Phase 2: Transform to canonical form
-    canonical_commands = []
+    canonical_commands: List[Tuple[str, List[Any]]] = []
     for block in blocks:
-        cmd, modargs = canonicalize_command(block)
-        canonical_commands.append((cmd, modargs))
+        canonical_commands.extend(canonicalize_command(block))
     
     # Collect descriptions and touched files
     descriptions: List[str] = []

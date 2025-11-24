@@ -2,6 +2,8 @@ import pytest
 import tempfile
 import os
 import shutil
+import ast
+import textwrap
 from pathlib import Path
 from vibemod.modify_code import (
     normalize_llm_quirks,
@@ -120,6 +122,39 @@ False
         assert len(blocks[0].arguments) == 3
         assert blocks[0].arguments[1] == ""
 
+    def test_leading_description(self):
+        """Test that leading text before first command is wrapped as modification_description."""
+        input_text = """This is a leading description.
+
+It spans multiple lines.
+
+MMM create_file MMM
+test.py
+@@@@@@
+print("hello")
+"""
+        blocks = extract_command_blocks(input_text)
+        assert len(blocks) == 2
+        assert blocks[0].command == "modification_description"
+        assert len(blocks[0].arguments) == 1
+        assert "This is a leading description." in blocks[0].arguments[0]
+        assert "It spans multiple lines." in blocks[0].arguments[0]
+        assert blocks[1].command == "create_file"
+        assert len(blocks[1].arguments) == 2
+        assert "test.py" in blocks[1].arguments[0]
+        assert 'print("hello")' in blocks[1].arguments[1]
+
+    def test_no_leading_description(self):
+        """Test that no leading description is added if file starts with command."""
+        input_text = """MMM create_file MMM
+test.py
+@@@@@@
+print("hello")
+"""
+        blocks = extract_command_blocks(input_text)
+        assert len(blocks) == 1
+        assert blocks[0].command == "create_file"
+
 
 # ============================================================================
 # PHASE 2 TESTS: Canonicalize Commands
@@ -158,7 +193,9 @@ class TestCanonicalizeCommand:
     def test_modification_description(self):
         """Test canonicalization of modification_description."""
         block = CommandBlock("modification_description", ["Fix the bug\n"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "modification_description"
         assert args == ["Fix the bug\n"]
     
@@ -171,77 +208,174 @@ class TestCanonicalizeCommand:
     def test_create_file_minimal(self):
         """Test create_file with minimal arguments."""
         block = CommandBlock("create_file", ["test.py", "print('hi')"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "create_file"
         assert args == ["test.py", "print('hi')", False]
     
     def test_create_file_with_executable(self):
         """Test create_file with make_executable flag."""
         block = CommandBlock("create_file", ["script.sh", "#!/bin/bash\n", "true"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "create_file"
         assert args == ["script.sh", "#!/bin/bash\n", True]
     
     def test_replace_file_contents(self):
         """Test replace_file_contents canonicalization."""
         block = CommandBlock("replace_file_contents", ["file.py", "new content"])
-        cmd, args = canonicalize_command(block)
-        assert cmd == "replace_file_contents"
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
+        assert cmd == "create_file"
         assert args == ["file.py", "new content", False]
     
     def test_move_file(self):
         """Test move_file canonicalization."""
         block = CommandBlock("move_file", ["src.py", "dst.py"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "move_file"
         assert args == ["src.py", "dst.py"]
     
     def test_make_directory(self):
         """Test make_directory canonicalization."""
         block = CommandBlock("make_directory", ["my_dir"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "make_directory"
         assert args == ["my_dir"]
     
     def test_remove_file_minimal(self):
         """Test remove_file with minimal arguments."""
         block = CommandBlock("remove_file", ["old.py"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "remove_file"
         assert args == ["old.py", False]
     
     def test_remove_file_recursive(self):
         """Test remove_file with recursive flag."""
         block = CommandBlock("remove_file", ["old_dir", "true"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "remove_file"
         assert args == ["old_dir", True]
     
     def test_update_header(self):
         """Test update_header canonicalization."""
         block = CommandBlock("update_header", ["module.py", "# New header\n"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "update_header"
         assert args == ["module.py", "# New header\n"]
+    
+    def test_update_header_with_declarations(self):
+        """Test update_header with declarations in content, splits into declares + header."""
+        content = """# New module header
+import sys
+from typing import List
+
+def helper_func(x: int) -> int:
+    return x * 2
+
+class MyClass:
+    def method(self):
+        return self.helper_func(5)
+
+async def async_func():
+    await asyncio.sleep(1)
+"""
+        block = CommandBlock("update_header", ["module.py", content])
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 4  # 3 declares + header
+        # First declare: helper_func
+        cmd, args = cmds[1]
+        assert cmd == "declare"
+        assert args[0] == "module.py"
+        assert args[1] == "helper_func"
+        decl_content = args[2]
+        assert "def helper_func(x: int) -> int:" in decl_content
+        assert "return x * 2" in decl_content
+        # Second: MyClass
+        cmd, args = cmds[2]
+        assert cmd == "declare"
+        assert args[1] == "MyClass"
+        assert "class MyClass:" in args[2]
+        assert "def method(self):" in args[2]
+        # Third: async_func
+        cmd, args = cmds[3]
+        assert cmd == "declare"
+        assert args[1] == "async_func"
+        assert "async def async_func():" in args[2]
+        # Header
+        cmd, args = cmds[0]
+        assert cmd == "update_header"
+        assert args[0] == "module.py"
+        header = args[1]
+        assert "# New module header" in header
+        assert "import sys" in header
+        assert "from typing import List" in header
+        assert "def helper_func" not in header
+    
+    def test_update_header_no_declarations(self):
+        """Test update_header with only header content."""
+        content = """# Header only
+import os
+# No classes or functions
+"""
+        block = CommandBlock("update_header", ["module.py", content])
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
+        assert cmd == "update_header"
+        assert args[0] == "module.py"
+        assert "# Header only" in args[1]
+    
+    def test_update_header_invalid_syntax(self):
+        """Test update_header with invalid syntax treated as header."""
+        content = """# Invalid
+def broken(
+"""
+        block = CommandBlock("update_header", ["module.py", content])
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
+        assert cmd == "update_header"
+        assert args[0] == "module.py"
+        assert "def broken(" in args[1]
     
     def test_declare(self):
         """Test declare canonicalization."""
         block = CommandBlock("declare", ["app.py", "MyClass.method", "def method(self): pass"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "declare"
         assert args == ["app.py", "MyClass.method", "def method(self): pass"]
     
     def test_update_declaration(self):
         """Test update_declaration canonicalization."""
         block = CommandBlock("update_declaration", ["app.py", "func", "def func(): return 42"])
-        cmd, args = canonicalize_command(block)
-        assert cmd == "update_declaration"
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
+        assert cmd == "declare"
         assert args == ["app.py", "func", "def func(): return 42"]
     
     def test_remove_declaration(self):
         """Test remove_declaration canonicalization."""
         block = CommandBlock("remove_declaration", ["app.py", "old_func"])
-        cmd, args = canonicalize_command(block)
+        cmds = canonicalize_command(block)
+        assert len(cmds) == 1
+        cmd, args = cmds[0]
         assert cmd == "remove_declaration"
         assert args == ["app.py", "old_func"]
     
@@ -304,7 +438,7 @@ class TestExecuteCanonical:
         
         # Replace contents
         new_content = "new content\n"
-        execute_canonical("replace_file_contents", [file_path, new_content, False])
+        execute_canonical("create_file", [file_path, new_content, False])
         
         with open(file_path) as f:
             assert f.read() == new_content
@@ -406,6 +540,53 @@ class MyClass:
         assert "def func():" in content
         assert "class MyClass:" in content
     
+    def test_update_header_from_split_declarations(self, temp_dir):
+        """Test executing declares then update_header after canonical split with declarations."""
+        file_path = os.path.join(temp_dir, "module.py")
+        
+        # Initial file with old content
+        original = """# Old header
+
+def old_func():
+    pass
+
+class OldClass:
+    pass
+"""
+        with open(file_path, 'w') as f:
+            f.write(original)
+        
+        # Simulate canonical commands from update_header with declarations (declares first, header last)
+        header = textwrap.dedent("""# New header
+import sys
+""")
+        helper_content = textwrap.dedent("""def helper(x: int) -> int:
+    return x * 2
+""")
+        class_content = textwrap.dedent("""class MyClass:
+    def method(self):
+        return helper(self.value)
+""")
+        
+        # Execute canonical commands
+        execute_canonical("declare", [file_path, "helper", helper_content])
+        execute_canonical("declare", [file_path, "MyClass", class_content])
+        execute_canonical("update_header", [file_path, header])
+        
+        # Verify file content
+        with open(file_path) as f:
+            content = f.read()
+        
+        assert "# New header" in content
+        assert "import sys" in content
+        assert "def helper(x: int) -> int:" in content
+        assert "return x * 2" in content
+        assert "class MyClass:" in content
+        assert "def method(self):" in content
+        # Old stuff should be preserved
+        assert "def old_func():" in content
+        assert "class OldClass:" in content
+    
     def test_declare_function(self, temp_dir):
         """Test declaring a new function."""
         file_path = os.path.join(temp_dir, "test_module.py")
@@ -414,10 +595,10 @@ class MyClass:
         with open(file_path, 'w') as f:
             f.write("# Module\n\ndef existing():\n    pass\n")
         
-        new_func = """
+        new_func = textwrap.dedent("""
 def new_function(x):
     return x * 2
-"""
+""")
         execute_canonical("declare", [file_path, "new_function", new_func])
         
         with open(file_path) as f:
@@ -435,7 +616,7 @@ def new_function(x):
         with open(file_path, 'w') as f:
             f.write("def func():\n    return 1\n")
         
-        new_func = "def func():\n    return 2\n"
+        new_func = textwrap.dedent("def func():\n    return 2\n")
         execute_canonical("declare", [file_path, "func", new_func])
         
         with open(file_path) as f:
@@ -452,16 +633,16 @@ def new_function(x):
         
         # Create file with class
         with open(file_path, 'w') as f:
-            f.write("""
+            f.write(textwrap.dedent("""
 class MyClass:
     def existing_method(self):
         pass
-""")
+"""))
         
-        new_method = """
+        new_method = textwrap.dedent("""
 def new_method(self, x):
     return x + 1
-"""
+""")
         execute_canonical("declare", [file_path, "MyClass.new_method", new_method])
         
         with open(file_path) as f:
@@ -471,13 +652,13 @@ def new_method(self, x):
         assert "def new_method(self, x):" in content
         assert "def existing_method(self):" in content
     
-    def test_remove_declaration(self, temp_dir):
+    def test_remove_declaration_function(self, temp_dir):
         """Test removing a function declaration."""
         file_path = os.path.join(temp_dir, "test_module.py")
         
         # Create file with multiple functions
         with open(file_path, 'w') as f:
-            f.write("""
+            f.write(textwrap.dedent("""
 def keep_this():
     pass
 
@@ -486,7 +667,7 @@ def remove_this():
 
 def also_keep():
     pass
-""")
+"""))
         
         execute_canonical("remove_declaration", [file_path, "remove_this"])
         
@@ -496,6 +677,145 @@ def also_keep():
         assert "def keep_this():" in content
         assert "def also_keep():" in content
         assert "remove_this" not in content
+        # Ensure no syntax errors after removal
+        ast.parse(content)
+    
+    def test_remove_declaration_class(self, temp_dir):
+        """Test removing a class declaration."""
+        file_path = os.path.join(temp_dir, "test_module.py")
+        
+        # Create file with classes and functions
+        with open(file_path, 'w') as f:
+            f.write(textwrap.dedent("""
+def keep_func():
+    pass
+
+class KeepClass:
+    pass
+
+class RemoveClass:
+    def method(self):
+        pass
+
+def another_keep():
+    pass
+"""))
+        
+        execute_canonical("remove_declaration", [file_path, "RemoveClass"])
+        
+        with open(file_path) as f:
+            content = f.read()
+        
+        assert "class KeepClass:" in content
+        assert "class RemoveClass" not in content
+        assert "def method(self):" not in content  # Method removed with class
+        assert "def keep_func():" in content
+        assert "def another_keep():" in content
+        # Ensure no syntax errors
+        ast.parse(content)
+    
+    def test_remove_declaration_nested_method(self, temp_dir):
+        """Test removing a nested method declaration."""
+        file_path = os.path.join(temp_dir, "test_class.py")
+        
+        # Create file with class and methods
+        with open(file_path, 'w') as f:
+            f.write(textwrap.dedent("""
+class MyClass:
+    def keep_method(self):
+        pass
+    
+    def remove_method(self):
+        pass
+    
+    def another_keep(self):
+        pass
+"""))
+        
+        execute_canonical("remove_declaration", [file_path, "MyClass.remove_method"])
+        
+        with open(file_path) as f:
+            content = f.read()
+        
+        assert "class MyClass:" in content
+        assert "def keep_method(self):" in content
+        assert "def remove_method" not in content
+        assert "def another_keep(self):" in content
+        # Ensure class remains valid
+        ast.parse(content)
+    
+    def test_remove_declaration_nonexistent(self, temp_dir):
+        """Test removing a non-existent declaration (should be no-op)."""
+        file_path = os.path.join(temp_dir, "test_module.py")
+        
+        # Create file without the target
+        with open(file_path, 'w') as f:
+            f.write(textwrap.dedent("""
+def existing():
+    pass
+"""))
+        
+        execute_canonical("remove_declaration", [file_path, "nonexistent"])
+        
+        with open(file_path) as f:
+            content = f.read()
+        
+        assert "def existing():" in content
+        assert "nonexistent" not in content
+        # File unchanged
+        ast.parse(content)
+    
+    def test_remove_declaration_multiple_occurrences(self, temp_dir):
+        """Test removing all occurrences of a declaration."""
+        file_path = os.path.join(temp_dir, "test_module.py")
+        
+        # Create file with duplicate functions
+        with open(file_path, 'w') as f:
+            f.write(textwrap.dedent("""
+def remove_this():
+    pass
+
+def other():
+    pass
+
+def remove_this():
+    pass  # Duplicate
+"""))
+        
+        execute_canonical("remove_declaration", [file_path, "remove_this"])
+        
+        with open(file_path) as f:
+            content = f.read()
+        
+        assert content.count("def remove_this():") == 0
+        assert "def other():" in content
+        # Ensure no syntax errors
+        ast.parse(content)
+    
+    def test_remove_declaration_with_imports(self, temp_dir):
+        """Test removing declaration doesn't affect imports."""
+        file_path = os.path.join(temp_dir, "test_module.py")
+        
+        with open(file_path, 'w') as f:
+            f.write(textwrap.dedent("""
+import json
+
+def parse_json(data):
+    return json.loads(data)
+
+def keep_func():
+    pass
+"""))
+        
+        execute_canonical("remove_declaration", [file_path, "parse_json"])
+        
+        with open(file_path) as f:
+            content = f.read()
+        
+        assert "import json" in content
+        assert "def parse_json" not in content
+        assert "def keep_func():" in content
+        ast.parse(content)
     
     def test_declare_with_imports(self, temp_dir):
         """Test that declare properly handles imports in new code."""
@@ -504,13 +824,13 @@ def also_keep():
         with open(file_path, 'w') as f:
             f.write("# Module\n")
         
-        new_func = """
+        new_func = textwrap.dedent("""
 import json
 from typing import List
 
 def parse_json(data: str) -> List:
     return json.loads(data)
-"""
+""")
         execute_canonical("declare", [file_path, "parse_json", new_func])
         
         with open(file_path) as f:
@@ -561,8 +881,7 @@ print("Hello, World!")
         # Phase 2
         canonical = []
         for block in blocks:
-            cmd, args = canonicalize_command(block)
-            canonical.append((cmd, args))
+            canonical.extend(canonicalize_command(block))
         
         # Phase 3
         os.chdir(temp_dir)
@@ -612,8 +931,10 @@ def test_add():
         blocks = extract_command_blocks(spec_content)
         os.chdir(temp_dir)
         
+        canonical = []
         for block in blocks:
-            cmd, args = canonicalize_command(block)
+            canonical.extend(canonicalize_command(block))
+        for cmd, args in canonical:
             execute_canonical(cmd, args)
         
         # Verify directory structure
@@ -628,6 +949,102 @@ def test_add():
             assert "class Calculator:" in content
             assert "def add(self, a, b):" in content
 
+    def test_full_pipeline_update_header_with_declarations(self, temp_dir):
+        """Test pipeline with update_header containing declarations."""
+        spec_content = """MMM update_header MMM
+module.py
+@@@@@@
+# New header
+import sys
+
+def new_func(x):
+    return x + 1
+
+class NewClass:
+    pass
+"""
+        
+        spec_path = os.path.join(temp_dir, "spec.modspec")
+        with open(spec_path, 'w') as f:
+            f.write(spec_content)
+        
+        # Create initial file
+        initial_content = """# Old header
+
+def old_func():
+    pass
+"""
+        initial_path = os.path.join(temp_dir, "module.py")
+        with open(initial_path, 'w') as f:
+            f.write(initial_content)
+        
+        # Run pipeline
+        blocks = extract_command_blocks(spec_content)
+        assert len(blocks) == 1
+        
+        canonical = []
+        for block in blocks:
+            canonical.extend(canonicalize_command(block))
+        assert len(canonical) == 3  # 2 declares + header
+        
+        os.chdir(temp_dir)
+        for cmd, args in canonical:
+            execute_canonical(cmd, args)
+        
+        # Verify
+        with open(initial_path) as f:
+            content = f.read()
+        
+        assert "# New header" in content
+        assert "import sys" in content
+        assert "def new_func(x):" in content
+        assert "return x + 1" in content
+        assert "class NewClass:" in content
+        assert "def old_func():" in content  # Preserved
+
+    def test_full_pipeline_remove_declaration(self, temp_dir):
+        """Test pipeline with remove_declaration."""
+        # Create initial file with target
+        file_path = os.path.join(temp_dir, "test.py")
+        with open(file_path, 'w') as f:
+            f.write(textwrap.dedent("""
+def keep():
+    pass
+
+def remove_me():
+    pass
+"""))
+        
+        spec_content = """MMM remove_declaration MMM
+test.py
+@@@@@@
+remove_me
+"""
+        
+        spec_path = os.path.join(temp_dir, "spec.modspec")
+        with open(spec_path, 'w') as f:
+            f.write(spec_content)
+        
+        # Run pipeline
+        blocks = extract_command_blocks(spec_content)
+        assert len(blocks) == 1
+        
+        canonical = []
+        for block in blocks:
+            canonical.extend(canonicalize_command(block))
+        assert len(canonical) == 1
+        
+        os.chdir(temp_dir)
+        for cmd, args in canonical:
+            execute_canonical(cmd, args)
+        
+        # Verify removal
+        with open(file_path) as f:
+            content = f.read()
+        
+        assert "def keep():" in content
+        assert "remove_me" not in content
+
 
 # ============================================================================
 # ERROR HANDLING TESTS
@@ -637,7 +1054,7 @@ class TestErrorHandling:
     """Test error handling and edge cases."""
     
     def test_malformed_command_ignored(self):
-        """Test that lines without MMM headers are ignored."""
+        """Test that non-command lines are handled appropriately (leading as desc, trailing in content)."""
         input_text = """Some random text
 MMM create_file MMM
 test.py
@@ -646,8 +1063,12 @@ content
 More random text
 """
         blocks = extract_command_blocks(input_text)
-        assert len(blocks) == 1
-        assert blocks[0].command == "create_file"
+        assert len(blocks) == 2
+        assert blocks[0].command == "modification_description"
+        assert "Some random text" in blocks[0].arguments[0]
+        assert blocks[1].command == "create_file"
+        assert blocks[1].arguments[0].strip() == "test.py"
+        assert "content\nMore random text" in blocks[1].arguments[1]
     
     def test_empty_input(self):
         """Test handling of empty input."""
