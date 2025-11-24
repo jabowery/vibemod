@@ -143,12 +143,12 @@ def parse_bool(s: str) -> bool:
 
 def canonicalize_command(block: CommandBlock) -> Tuple[str, List[Any]]:
     """
-    Transform a CommandBlock into canonical form (command, args).
+    Transform a CommandBlock into canonical form (command, modargs).
     
     This is the "permissive grammar" that accepts various arities and
     transforms them into the canonical form expected by execute().
     
-    Returns: (command_name, canonical_args)
+    Returns: (command_name, canonical_modargs)
     """
     cmd = block.command
     sections = block.arguments
@@ -159,9 +159,16 @@ def canonicalize_command(block: CommandBlock) -> Tuple[str, List[Any]]:
         if arity != 1:
             raise ValueError(f'{cmd} requires exactly 1 argument but got {arity}')
         return (cmd, [sections[0]])
-    
+    section0list = sections[0].split()
+    if len(section0list)!=1:
+        section0list.extend(sections[1:])
+        sections = section0list
+        arity += 1
+    if sections[-1].strip()=='':
+        sections = sections[:-1]
+        arity -= 1
     # create_file, replace_file_contents: path, content, [make_exec=False]
-    elif cmd in ['create_file', 'replace_file_contents']:
+    if cmd in ['create_file', 'replace_file_contents']:
         if arity < 2 or arity > 3:
             raise ValueError(f'{cmd} requires 2 or 3 arguments but got {arity}')
         
@@ -367,7 +374,7 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
         f.write(new_source + '\n')
 
 
-def execute_canonical(cmd: str, args: List[Any]):
+def execute_canonical(cmd: str, modargs: List[Any]):
     """
     Execute a command in canonical form.
     
@@ -384,28 +391,28 @@ def execute_canonical(cmd: str, args: List[Any]):
     - modification_description(description)
     """
     print(cmd)
-#    print(args)
+#    print(modargs)
     if cmd == 'modification_description':
         # No-op: descriptions are collected separately
         return
     
     elif cmd in ['create_file', 'replace_file_contents']:
-        path, content, make_exec = args
+        path, content, make_exec = modargs
         with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
         if make_exec and not sys.platform.startswith('win'):
             os.chmod(path, 0o755)
     
     elif cmd == 'move_file':
-        src, dst = args
+        src, dst = modargs
         shutil.move(src, dst)
     
     elif cmd == 'make_directory':
-        path = args[0]
+        path = modargs[0]
         os.makedirs(path, exist_ok=True)
     
     elif cmd == 'remove_file':
-        path, recursive = args
+        path, recursive = modargs
         if os.path.isdir(path):
             if recursive:
                 shutil.rmtree(path)
@@ -417,7 +424,7 @@ def execute_canonical(cmd: str, args: List[Any]):
             raise FileNotFoundError(f'No such file or directory: {path}')
     
     elif cmd == 'update_header':
-        file_path, new_header = args
+        file_path, new_header = modargs
         if not os.path.exists(file_path):
             raise FileNotFoundError(f'File not found: {file_path}')
         
@@ -455,11 +462,11 @@ def execute_canonical(cmd: str, args: List[Any]):
             f.write(new_source)
     
     elif cmd in ['declare', 'update_declaration']:
-        file_path, dotted_target, content = args
+        file_path, dotted_target, content = modargs
         modify_declaration(file_path, dotted_target, content, remove=False)
     
     elif cmd == 'remove_declaration':
-        file_path, dotted_target = args
+        file_path, dotted_target = modargs
         modify_declaration(file_path, dotted_target, None, remove=True)
     
     else:
@@ -470,14 +477,14 @@ def execute_canonical(cmd: str, args: List[Any]):
 # MAIN APPLICATION LOGIC
 # ============================================================================
 
-def get_touched_files(cmd: str, args: List[Any]) -> List[str]:
+def get_touched_files(cmd: str, modargs: List[Any]) -> List[str]:
     """Return list of files touched by this command."""
     if cmd in ['create_file', 'replace_file_contents', 'make_directory', 
                'remove_file', 'update_header', 'declare', 'update_declaration', 
                'remove_declaration']:
-        return [args[0]]
+        return [modargs[0]]
     elif cmd == 'move_file':
-        return [args[0], args[1]]
+        return [modargs[0], modargs[1]]
     return []
 
 
@@ -499,18 +506,18 @@ def apply_modspec(spec_file: str):
     # Phase 2: Transform to canonical form
     canonical_commands = []
     for block in blocks:
-        cmd, args = canonicalize_command(block)
-        canonical_commands.append((cmd, args))
+        cmd, modargs = canonicalize_command(block)
+        canonical_commands.append((cmd, modargs))
     
     # Collect descriptions and touched files
     descriptions: List[str] = []
     touched: set = set()
     
-    for cmd, args in canonical_commands:
+    for cmd, modargs in canonical_commands:
         if cmd == 'modification_description':
-            descriptions.append(args[0])
+            descriptions.append(modargs[0])
         else:
-            touched.update(get_touched_files(cmd, args))
+            touched.update(get_touched_files(cmd, modargs))
     
     desc = '\n'.join(descriptions).strip() or 'Automated modifications'
     
@@ -527,9 +534,9 @@ def apply_modspec(spec_file: str):
     
     try:
         # Phase 3: Execute canonical commands
-        for cmd, args in canonical_commands:
+        for cmd, modargs in canonical_commands:
             if cmd != 'modification_description':
-                execute_canonical(cmd, args)
+                execute_canonical(cmd, modargs)
         
         # Commit changes
         for path in touched:
