@@ -3,7 +3,7 @@ Comply with these program modification standards:
 Modification File Format
 
 directive_name can be one of these:
-modification_description, declare, remove_declaration, update_header, create_file, move_file, make_directory, remove_file, replace_file
+modification_description, declare, remove_declaration, update_header, create_file, move_file, make_directory, remove_file
 
 The syntax for directives ("directive_name" is one of the above):
 
@@ -26,7 +26,6 @@ create_file(file_path, file_content, make_executable=True)
 move_file(src, dst)
 make_directory(path)
 remove_file(path, recursive=False)
-replace_file_contents(path, file_content)
 
 Code Modifications
 

@@ -312,7 +312,6 @@ def get_scope(tree: ast.AST, parts: List[str]):
         scopes.append(found)
     return scopes[-1]
 
-
 def modify_declaration(file_path: str, dotted_target: str, content: str | None, remove: bool):
     """Modify a declaration in a Python file using AST manipulation."""
     if not os.path.exists(file_path):
@@ -338,7 +337,15 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
     
     header_end_line = 0  # Line index where declarations start
     if original_decl_nodes:
-        first_decl_lineno = min(node.lineno for node in original_decl_nodes)
+        # Robustly find the start line, accounting for decorators
+        start_lines = []
+        for node in original_decl_nodes:
+            if hasattr(node, 'decorator_list') and node.decorator_list:
+                start_lines.append(node.decorator_list[0].lineno)
+            else:
+                start_lines.append(node.lineno)
+        
+        first_decl_lineno = min(start_lines)
         header_end_line = first_decl_lineno - 1
     
     parts = dotted_target.split('.')
@@ -453,7 +460,16 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
         ]
         
         if new_decl_nodes:
-            new_first_decl_lineno = min(node.lineno for node in new_decl_nodes)
+            # Apply same robust logic to new nodes
+            new_start_lines = []
+            for node in new_decl_nodes:
+                if hasattr(node, 'decorator_list') and node.decorator_list:
+                    new_start_lines.append(node.decorator_list[0].lineno)
+                else:
+                    new_start_lines.append(node.lineno)
+            
+            new_first_decl_lineno = min(new_start_lines)
+            
             # Combine original header with unparsed declarations
             decls_part = ''.join(new_lines[new_first_decl_lineno - 1:])
             final_source = header + decls_part
@@ -466,7 +482,6 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
     
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(final_source)
-
 
 
 def execute_canonical(cmd: str, modargs: List[Any]):
