@@ -38,7 +38,25 @@ RUST_BODY_TYPES = frozenset({
     'mod_item',
     'union_item',
 })
+class _NodeWithAttributes:
+    """Wrapper to represent a node with its preceding attributes' byte range."""
 
+    def __init__(self, start_byte: int, end_byte: int, inner_node: 'Node'):
+        self.start_byte = start_byte
+        self.end_byte = end_byte
+        self.type = inner_node.type
+        self._inner = inner_node
+
+    def child_by_field_name(self, name: str):
+        return self._inner.child_by_field_name(name)
+
+    @property
+    def children(self):
+        return self._inner.children
+
+    @property
+    def text(self):
+        return self._inner.text
 
 class RustHandler(LanguageHandler):
     """Handler for Rust source files using tree-sitter-rust."""
@@ -88,7 +106,7 @@ class RustHandler(LanguageHandler):
     def _find_in_scope(self, node: 'Node', name: str, content_bytes: bytes) -> Optional['Node']:
         """Find a named declaration within a scope node."""
         if node.type == 'source_file':
-            children = node.children
+            children = list(node.children)
         elif node.type in ('impl_item', 'trait_item'):
             body = node.child_by_field_name('body')
             if body is None:
@@ -98,19 +116,27 @@ class RustHandler(LanguageHandler):
                         break
             if body is None:
                 return None
-            children = body.children
+            children = list(body.children)
         elif node.type == 'mod_item':
             body = node.child_by_field_name('body')
             if body is None:
                 return None
-            children = body.children
+            children = list(body.children)
         else:
-            children = node.children
-        for child in children:
-            if child.type in RUST_DECL_TYPES:
+            children = list(node.children)
+        pending_attributes: List['Node'] = []
+        for i, child in enumerate(children):
+            if child.type == 'attribute_item':
+                pending_attributes.append(child)
+            elif child.type in RUST_DECL_TYPES:
                 child_name = self._get_node_name(child)
                 if child_name == name:
+                    if pending_attributes:
+                        return _NodeWithAttributes(pending_attributes[0].start_byte, child.end_byte, child)
                     return child
+                pending_attributes = []
+            else:
+                pending_attributes = []
         return None
 
     def find_declaration(self, content: str, target_path: str) -> Optional[Tuple[int, int]]:
