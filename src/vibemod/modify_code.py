@@ -63,6 +63,8 @@ def _execute_update_header(file_path: str, new_header: str):
 def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, content: str | None, remove: bool):
     """Rust-specific declaration modification using tree-sitter."""
     from .handlers import get_handler
+    if source is None:
+        source = ''
     handler = get_handler(file_path)
     loc = handler.find_declaration(source, dotted_target)
     if remove:
@@ -82,7 +84,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
             start, end = loc
             new_source = source[:start] + content + source[end:]
         else:
-            new_source = source.rstrip() + '\n\n' + content + '\n'
+            new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
 
@@ -417,17 +419,21 @@ def modify_declaration(file_path: str, dotted_target: str, content: str | None, 
     Supports Python (.py) and Rust (.rs) files via the handler registry.
     """
     from .handlers import get_handler
-    if not os.path.exists(file_path):
+    file_exists = os.path.exists(file_path)
+    if not file_exists:
         if remove:
             return
-        raise FileNotFoundError(f'File not found: {file_path}')
-    with open(file_path, 'r', encoding='utf-8') as f:
-        source = f.read()
+        source = None
+    else:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            source = f.read()
     ext = os.path.splitext(file_path)[1]
     if ext == '.py':
+        if not file_exists:
+            raise FileNotFoundError(f'File not found: {file_path}')
         _modify_declaration_python(file_path, source, dotted_target, content, remove)
     elif ext == '.rs':
-        _modify_declaration_rust(file_path, source, dotted_target, content, remove)
+        _modify_declaration_rust(file_path, source or '', dotted_target, content, remove)
     else:
         handler = get_handler(file_path)
         raise ValueError(f'Declaration modification not yet implemented for {ext}')
