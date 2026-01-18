@@ -207,6 +207,41 @@ class RustHandler(LanguageHandler):
     - Rich error diagnostics
     """
 
+    def validate_no_illegal_duplicates(self, content: str) -> Optional[str]:
+        """
+    Validate that the content has no illegal duplicate declarations.
+
+    Returns None if valid, or an error message describing the duplicates.
+    """
+        items = self._build_item_index(content)
+        seen: dict[tuple, IndexedItem] = {}
+        duplicates: List[tuple[str, str, IndexedItem, IndexedItem]] = []
+        for item in items:
+            if item.parent_impl is not None:
+                continue
+            if item.kind == 'impl_item':
+                continue
+            if item.kind not in RUST_UNIQUE_ITEM_TYPES:
+                continue
+            if item.name is None:
+                continue
+            key = (tuple(item.module_path), item.kind, item.name)
+            if key in seen:
+                existing = seen[key]
+                duplicates.append((item.kind, item.name, existing, item))
+            else:
+                seen[key] = item
+        if not duplicates:
+            return None
+        lines = ['Illegal duplicate declarations detected:']
+        for kind, name, first, second in duplicates:
+            kind_name = kind.replace('_item', '').replace('_', ' ')
+            lines.append(f"  - {kind_name} '{name}' declared at bytes {first.start_byte} and {second.start_byte}")
+        lines.append('')
+        lines.append('Rust requires these items to be unique within a module scope.')
+        lines.append('The modification has been rejected to prevent invalid code.')
+        return '\n'.join(lines)
+
     def __init__(self):
         if not TREE_SITTER_AVAILABLE:
             raise ImportError('tree-sitter and tree-sitter-rust are required for Rust support. Install with: pip install tree-sitter tree-sitter-rust')
