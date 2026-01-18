@@ -58,7 +58,18 @@ def process_file(self, filepath):
     with open(filepath, 'r') as f:
         data = f.read()
     return self.transform(data)
-
+MMM declare MMM
+rustapp.rs
+@@@@@@
+Engine.eval
+@@@@@@
+    pub async fn eval(&self, t: Tuple) {
+        let handle = self.handle();
+        if let Some(Value::Code(f)) = t.fields.iter().find(|v| matches!(v, Value::Code(_))) {
+            let f = f.clone(); // clone the Arc<dyn Fn(...)>
+            tokio::spawn((f)(handle));
+        }
+    }
 MMM create_file MMM
 run_tests.sh
 @@@@@@
