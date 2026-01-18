@@ -1,0 +1,20 @@
+RUST MODIFICATION CONSTRAINTS (VIBEMOD)
+
+Rust allows multiple declarations of the “same” symbol name in a file (e.g., multiple `impl Type {}` blocks; cfg-gated duplicate items; trait impls). Therefore:
+
+1) NEVER assume a symbol name is unique.
+2) When modifying Rust, ALWAYS target the exact item kind and anchor:
+   - Use `impl(TypeName).method_name` for inherent methods.
+   - Use `impl(TraitName for TypeName).method_name` for trait methods.
+   - Use `impl(TypeName)#[cfg(...)]...` when cfg-gated.
+3) If there may be multiple matches, add an occurrence selector `@N` (1-based) OR design the change so “replace all matches” is correct.
+4) When adding a new method, do NOT emit a bare `fn` at module scope. Either:
+   - insert into a specific existing `impl` block (disambiguated), or
+   - add a complete new `impl TypeName { ... }` block with appropriate attributes (e.g., `#[cfg(test)]`).
+5) Always provide COMPLETE Rust items (entire `impl` blocks or entire `fn`/`struct` items). No partial snippets.
+6) For test-only helpers, prefer:
+   - `#[cfg(test)] impl TypeName { ... }`
+   and target paths using `impl(TypeName)#[cfg(test)].method`.
+7) If the change requires insertion rather than replacement, specify an explicit insertion anchor in the target_path (append_module/append_file/insert_before/insert_after) as supported by the adapter; do not guess an insertion location implicitly.
+
+Output MUST be vibemod directives only. Each directive must contain full replacement code for the targeted Rust item(s).
