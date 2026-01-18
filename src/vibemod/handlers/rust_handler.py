@@ -43,6 +43,21 @@ RUST_BODY_TYPES = frozenset({
 class RustHandler(LanguageHandler):
     """Handler for Rust source files using tree-sitter-rust."""
 
+    def _get_impl_type_name(self, impl_node: 'Node') -> Optional[str]:
+        """Extract the type name from an impl block (e.g., 'Calculator' from 'impl Calculator')."""
+        type_node = impl_node.child_by_field_name('type')
+        if type_node:
+            if type_node.type == 'type_identifier':
+                return type_node.text.decode('utf-8')
+            elif type_node.type == 'generic_type':
+                ident = type_node.child_by_field_name('type')
+                if ident:
+                    return ident.text.decode('utf-8')
+        for child in impl_node.children:
+            if child.type == 'type_identifier':
+                return child.text.decode('utf-8')
+        return None
+
     def __init__(self):
         if not TREE_SITTER_AVAILABLE:
             raise ImportError('tree-sitter and tree-sitter-rust are required for Rust support. Install with: pip install tree-sitter tree-sitter-rust')
@@ -103,6 +118,20 @@ class RustHandler(LanguageHandler):
         root = self._parse(content)
         content_bytes = content.encode('utf-8')
         parts = target_path.split('.')
+        if len(parts) == 1:
+            found = self._find_in_scope(root, parts[0], content_bytes)
+            if found:
+                return (found.start_byte, found.end_byte)
+            return None
+        type_name = parts[0]
+        method_name = parts[1]
+        for child in root.children:
+            if child.type == 'impl_item':
+                impl_type = self._get_impl_type_name(child)
+                if impl_type == type_name:
+                    found = self._find_in_scope(child, method_name, content_bytes)
+                    if found:
+                        return (found.start_byte, found.end_byte)
         current_scope = root
         for i, part in enumerate(parts):
             found = self._find_in_scope(current_scope, part, content_bytes)
