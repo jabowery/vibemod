@@ -61,32 +61,84 @@ def _execute_update_header(file_path: str, new_header: str):
             f.write(new_source)
 
 def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, content: str | None, remove: bool):
-    """Rust-specific declaration modification using tree-sitter."""
-    from .handlers import get_handler
-    if source is None:
-        source = ''
-    handler = get_handler(file_path)
-    loc = handler.find_declaration(source, dotted_target)
+    """
+    Rust-specific declaration modification using tree-sitter.
+
+    Implements the vibemod Rust specification:
+    - Multi-match replace/remove (replaces ALL matches by default)
+    - Insertion anchors for new items
+    - Rich error diagnostics
+    """
+    from .handlers.rust_handler import RustHandler, parse_target_path
+    handler = RustHandler()
+    target = parse_target_path(dotted_target)
     if remove:
-        if loc is None:
+        spans = handler.find_all_declarations(source, dotted_target)
+        if not spans:
             return
-        start, end = loc
-        new_source = source[:start].rstrip() + '\n\n' + source[end:].lstrip()
-        import re
+        spans.sort(key=lambda s: s[0], reverse=True)
+        new_source = source
+        for start, end in spans:
+            before = new_source[:start].rstrip()
+            after = new_source[end:].lstrip()
+            new_source = before + '\n\n' + after
         new_source = re.sub('\\n{3,}', '\n\n', new_source)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
-    else:
-        if content is None:
-            raise ValueError('Content required for non-remove declaration operation')
-        content = textwrap.dedent(content).strip()
-        if loc:
-            start, end = loc
-            new_source = source[:start] + content + source[end:]
-        else:
-            new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
+        return
+    if content is None:
+        raise ValueError('Content required for declare operation')
+    content = textwrap.dedent(content).strip()
+    if target.is_insertion:
+        insertion_point = handler.get_insertion_point(source, dotted_target)
+        if insertion_point is None:
+            diagnostic = handler.format_candidates_diagnostic(source, dotted_target)
+            raise ValueError(f'Cannot determine insertion point.\n{diagnostic}')
+        before = source[:insertion_point].rstrip()
+        after = source[insertion_point:].lstrip()
+        new_source = before + '\n\n' + content + '\n\n' + after
+        new_source = re.sub('\\n{3,}', '\n\n', new_source)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
+        return
+    if target.is_impl_target and target.associated_name:
+        spans = handler.find_all_declarations(source, dotted_target)
+        if spans:
+            spans.sort(key=lambda s: s[0], reverse=True)
+            new_source = source
+            for start, end in spans:
+                new_source = new_source[:start] + content + new_source[end:]
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(new_source)
+            return
+        insertion_point = handler.get_impl_block_insertion_point(source, dotted_target)
+        if insertion_point is None:
+            diagnostic = handler.format_candidates_diagnostic(source, dotted_target)
+            raise ValueError(f"Cannot insert method '{target.associated_name}': no matching impl block found or multiple impl blocks match (use @N selector).\n{diagnostic}")
+        line_start = source.rfind('\n', 0, insertion_point) + 1
+        line_content = source[line_start:insertion_point]
+        base_indent = len(line_content) - len(line_content.lstrip())
+        indent = ' ' * (base_indent + 4)
+        indented_content = '\n'.join((indent + line if line.strip() else line for line in content.split('\n')))
+        new_source = source[:insertion_point] + '\n' + indented_content + '\n' + source[insertion_point:]
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_source)
+        return
+    spans = handler.find_all_declarations(source, dotted_target)
+    if spans:
+        spans.sort(key=lambda s: s[0], reverse=True)
+        new_source = source
+        for start, end in spans:
+            new_source = new_source[:start] + content + new_source[end:]
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_source)
+        return
+    if target.is_impl_target and (not target.associated_name):
+        diagnostic = handler.format_candidates_diagnostic(source, dotted_target)
+        raise ValueError(f"No impl block found for '{dotted_target}'. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
+    new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(new_source)
 
 def _modify_declaration_python(file_path: str, source: str, dotted_target: str, content: str | None, remove: bool):
     """Python-specific declaration modification using AST."""

@@ -1,8 +1,18 @@
 # src/vibemod/handlers/rust_handler.py
-"""Rust language handler using tree-sitter-rust."""
+"""
+Rust language handler using tree-sitter-rust.
+
+Implements the vibemod Rust specification:
+- Extended target path grammar
+- Multi-match replace/remove semantics  
+- Explicit insertion anchors
+- Signature-based disambiguation
+- Rich error diagnostics
+"""
 
 import re
-from typing import Optional, Tuple, List
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List, Set
 
 from .base import LanguageHandler, register_handler
 
@@ -14,7 +24,10 @@ except ImportError:
     TREE_SITTER_AVAILABLE = False
 
 
-# Rust declaration node types that we consider "declarations"
+# =============================================================================
+# RUST DECLARATION TYPES
+# =============================================================================
+
 RUST_DECL_TYPES = frozenset({
     'function_item',
     'struct_item',
@@ -29,7 +42,6 @@ RUST_DECL_TYPES = frozenset({
     'macro_definition',
 })
 
-# Types that mark the start of the "body" (not header)
 RUST_BODY_TYPES = frozenset({
     'struct_item',
     'enum_item',
@@ -38,47 +50,229 @@ RUST_BODY_TYPES = frozenset({
     'mod_item',
     'union_item',
 })
-class _NodeWithAttributes:
-    """Wrapper to represent a node with its preceding attributes' byte range."""
 
-    def __init__(self, start_byte: int, end_byte: int, inner_node: 'Node'):
-        self.start_byte = start_byte
-        self.end_byte = end_byte
-        self.type = inner_node.type
-        self._inner = inner_node
+RUST_ASSOCIATED_ITEM_TYPES = frozenset({
+    'function_item',
+    'const_item', 
+    'type_item',
+})
 
-    def child_by_field_name(self, name: str):
-        return self._inner.child_by_field_name(name)
 
+# =============================================================================
+# TARGET PATH PARSING
+# =============================================================================
+
+@dataclass
+class TargetPath:
+    """Parsed representation of a vibemod target path for Rust."""
+    
+    # Module path segments (e.g., ['foo', 'bar'] for foo::bar::)
+    module_path: List[str] = field(default_factory=list)
+    
+    # Item name (for non-impl items)
+    item_name: Optional[str] = None
+    
+    # Impl block specification
+    impl_type: Optional[str] = None          # e.g., "TLinda"
+    impl_trait: Optional[str] = None         # e.g., "Display" for impl Display for TLinda
+    
+    # Associated item within impl/trait
+    associated_name: Optional[str] = None    # e.g., "debug_count"
+    
+    # Attribute filter (e.g., "#[cfg(test)]")
+    attr_filter: Optional[str] = None
+    
+    # Occurrence selector (1-based)
+    occurrence: Optional[int] = None
+    
+    # Insertion anchor
+    insertion_anchor: Optional[str] = None   # append_module, append_file, insert_before(...), insert_after(...)
+    insertion_ref: Optional[str] = None      # Reference item for insert_before/after
+    
     @property
-    def children(self):
-        return self._inner.children
-
+    def is_impl_target(self) -> bool:
+        return self.impl_type is not None
+    
     @property
-    def text(self):
-        return self._inner.text
+    def is_trait_impl(self) -> bool:
+        return self.impl_trait is not None
+    
+    @property
+    def is_insertion(self) -> bool:
+        return self.insertion_anchor is not None
+
+
+def parse_target_path(target_path: str) -> TargetPath:
+    """
+    Parse a vibemod target path string into structured form.
+    
+    Examples:
+        "TLinda" -> item_name="TLinda"
+        "impl(TLinda)" -> impl_type="TLinda"
+        "impl(TLinda).eval" -> impl_type="TLinda", associated_name="eval"
+        "impl(Display for TLinda).fmt" -> impl_trait="Display", impl_type="TLinda", associated_name="fmt"
+        "impl(TLinda)#[cfg(test)].debug_count" -> impl_type="TLinda", attr_filter="#[cfg(test)]", associated_name="debug_count"
+        "impl(TLinda)@2" -> impl_type="TLinda", occurrence=2
+        "foo::bar::Baz" -> module_path=["foo", "bar"], item_name="Baz"
+        "TLinda@append_file" -> item_name="TLinda", insertion_anchor="append_file"
+    """
+    result = TargetPath()
+    remaining = target_path.strip()
+    
+    # Extract insertion anchor (at the end)
+    insertion_match = re.search(r'@(append_module|append_file|insert_before\([^)]+\)|insert_after\([^)]+\))$', remaining)
+    if insertion_match:
+        anchor = insertion_match.group(1)
+        if anchor.startswith('insert_before('):
+            result.insertion_anchor = 'insert_before'
+            result.insertion_ref = anchor[14:-1]  # Extract reference
+        elif anchor.startswith('insert_after('):
+            result.insertion_anchor = 'insert_after'
+            result.insertion_ref = anchor[13:-1]
+        else:
+            result.insertion_anchor = anchor
+        remaining = remaining[:insertion_match.start()]
+    
+    # Extract occurrence selector @N (but not insertion anchors)
+    occurrence_match = re.search(r'@(\d+)$', remaining)
+    if occurrence_match:
+        result.occurrence = int(occurrence_match.group(1))
+        remaining = remaining[:occurrence_match.start()]
+    
+    # Extract attribute filter #[...]
+    attr_match = re.search(r'(#\[[^\]]+\])', remaining)
+    if attr_match:
+        result.attr_filter = attr_match.group(1)
+        remaining = remaining[:attr_match.start()] + remaining[attr_match.end():]
+    
+    # Check for impl(...) syntax
+    impl_match = re.match(r'^(.+::)?impl\(([^)]+)\)(?:\.(\w+))?$', remaining)
+    if impl_match:
+        if impl_match.group(1):
+            result.module_path = impl_match.group(1).rstrip('::').split('::')
+        
+        impl_spec = impl_match.group(2).strip()
+        
+        # Check for trait impl: "Trait for Type"
+        trait_match = re.match(r'(\w+(?:::\w+)*)\s+for\s+(\w+(?:::\w+)*)', impl_spec)
+        if trait_match:
+            result.impl_trait = trait_match.group(1)
+            result.impl_type = trait_match.group(2)
+        else:
+            result.impl_type = impl_spec
+        
+        if impl_match.group(3):
+            result.associated_name = impl_match.group(3)
+        
+        return result
+    
+    # Check for simple dotted path (legacy support): Type.method
+    if '.' in remaining and 'impl(' not in remaining:
+        parts = remaining.split('.')
+        # Could be module::Type.method or just Type.method
+        type_part = parts[0]
+        if '::' in type_part:
+            segments = type_part.split('::')
+            result.module_path = segments[:-1]
+            result.impl_type = segments[-1]
+        else:
+            result.impl_type = type_part
+        result.associated_name = parts[1]
+        return result
+    
+    # Simple item path: module::path::ItemName or just ItemName
+    if '::' in remaining:
+        segments = remaining.split('::')
+        result.module_path = segments[:-1]
+        result.item_name = segments[-1]
+    else:
+        result.item_name = remaining
+    
+    return result
+
+
+# =============================================================================
+# ITEM INDEX
+# =============================================================================
+
+@dataclass
+class IndexedItem:
+    """An indexed Rust item with full metadata for disambiguation."""
+    
+    kind: str                                # function_item, struct_item, impl_item, etc.
+    name: Optional[str]                      # Item name (None for impl blocks)
+    module_path: List[str]                   # Module path segments
+    
+    # Span in source
+    start_byte: int
+    end_byte: int
+    
+    # For impl blocks
+    impl_type: Optional[str] = None
+    impl_trait: Optional[str] = None
+    
+    # Attributes
+    attrs: List[str] = field(default_factory=list)
+    attrs_fingerprint: str = ""
+    
+    # For associated items, reference to parent impl
+    parent_impl: Optional['IndexedItem'] = None
+    
+    # Associated items (for impl/trait blocks)
+    associated_items: List['IndexedItem'] = field(default_factory=list)
+    
+    # Original node (for insertion point calculations)
+    node: Optional['Node'] = None
+    
+    @property
+    def canonical_path(self) -> str:
+        """Build canonical path string for diagnostics."""
+        parts = []
+        if self.module_path:
+            parts.append('::'.join(self.module_path) + '::')
+        
+        if self.kind == 'impl_item':
+            if self.impl_trait:
+                parts.append(f'impl({self.impl_trait} for {self.impl_type})')
+            else:
+                parts.append(f'impl({self.impl_type})')
+        elif self.name:
+            parts.append(self.name)
+        
+        if self.attrs_fingerprint:
+            parts.append(self.attrs_fingerprint)
+        
+        return ''.join(parts)
+    
+    def matches_attr_filter(self, attr_filter: Optional[str]) -> bool:
+        """Check if this item matches the attribute filter."""
+        if attr_filter is None:
+            return True
+        return attr_filter in self.attrs
+
+
+# =============================================================================
+# RUST HANDLER
+# =============================================================================
 
 class RustHandler(LanguageHandler):
-    """Handler for Rust source files using tree-sitter-rust."""
-
-    def _get_impl_type_name(self, impl_node: 'Node') -> Optional[str]:
-        """Extract the type name from an impl block (e.g., 'Calculator' from 'impl Calculator')."""
-        type_node = impl_node.child_by_field_name('type')
-        if type_node:
-            if type_node.type == 'type_identifier':
-                return type_node.text.decode('utf-8')
-            elif type_node.type == 'generic_type':
-                ident = type_node.child_by_field_name('type')
-                if ident:
-                    return ident.text.decode('utf-8')
-        for child in impl_node.children:
-            if child.type == 'type_identifier':
-                return child.text.decode('utf-8')
-        return None
+    """
+    Handler for Rust source files using tree-sitter-rust.
+    
+    Implements the full vibemod Rust specification with:
+    - Extended target path grammar
+    - Multi-match semantics
+    - Insertion anchors
+    - Signature-based disambiguation
+    - Rich error diagnostics
+    """
 
     def __init__(self):
         if not TREE_SITTER_AVAILABLE:
-            raise ImportError('tree-sitter and tree-sitter-rust are required for Rust support. Install with: pip install tree-sitter tree-sitter-rust')
+            raise ImportError(
+                "tree-sitter and tree-sitter-rust are required for Rust support. "
+                "Install with: pip install tree-sitter tree-sitter-rust"
+            )
         self._language = Language(tsrust.language())
         self._parser = Parser(self._language)
 
@@ -87,113 +281,453 @@ class RustHandler(LanguageHandler):
         tree = self._parser.parse(content.encode('utf-8'))
         return tree.root_node
 
-    def _get_node_name(self, node: 'Node') -> Optional[str]:
-        """Extract the name from a declaration node."""
-        name_node = node.child_by_field_name('name')
-        if name_node:
-            return name_node.text.decode('utf-8')
-        if node.type == 'impl_item':
-            type_node = node.child_by_field_name('type')
-            if type_node:
-                if type_node.type == 'type_identifier':
-                    return type_node.text.decode('utf-8')
-                elif type_node.type == 'generic_type':
-                    ident = type_node.child_by_field_name('type')
-                    if ident:
-                        return ident.text.decode('utf-8')
-        return None
-
-    def _find_in_scope(self, node: 'Node', name: str, content_bytes: bytes) -> Optional['Node']:
-        """Find a named declaration within a scope node."""
-        if node.type == 'source_file':
-            children = list(node.children)
-        elif node.type in ('impl_item', 'trait_item'):
-            body = node.child_by_field_name('body')
-            if body is None:
-                for child in node.children:
-                    if child.type == 'declaration_list':
-                        body = child
-                        break
-            if body is None:
-                return None
-            children = list(body.children)
-        elif node.type == 'mod_item':
-            body = node.child_by_field_name('body')
-            if body is None:
-                return None
-            children = list(body.children)
-        else:
-            children = list(node.children)
-        pending_attributes: List['Node'] = []
-        for i, child in enumerate(children):
+    # -------------------------------------------------------------------------
+    # Item Indexing
+    # -------------------------------------------------------------------------
+    
+    def _build_item_index(self, content: str) -> List[IndexedItem]:
+        """Build a complete index of all items in the file."""
+        root = self._parse(content)
+        items: List[IndexedItem] = []
+        self._index_scope(root, [], items, content)
+        return items
+    
+    def _index_scope(
+        self, 
+        node: 'Node', 
+        module_path: List[str],
+        items: List[IndexedItem],
+        content: str
+    ) -> None:
+        """Recursively index items in a scope."""
+        pending_attrs: List[str] = []
+        attr_start: Optional[int] = None
+        
+        children = list(node.children)
+        
+        for child in children:
             if child.type == 'attribute_item':
-                pending_attributes.append(child)
-            elif child.type in RUST_DECL_TYPES:
-                child_name = self._get_node_name(child)
-                if child_name == name:
-                    if pending_attributes:
-                        return _NodeWithAttributes(pending_attributes[0].start_byte, child.end_byte, child)
-                    return child
-                pending_attributes = []
+                attr_text = content[child.start_byte:child.end_byte].strip()
+                pending_attrs.append(attr_text)
+                if attr_start is None:
+                    attr_start = child.start_byte
+                continue
+            
+            if child.type in RUST_DECL_TYPES:
+                item = self._index_item(
+                    child, 
+                    module_path, 
+                    pending_attrs,
+                    attr_start if pending_attrs else child.start_byte,
+                    content
+                )
+                if item:
+                    items.append(item)
+                    
+                    # Index associated items for impl/trait blocks
+                    if child.type in ('impl_item', 'trait_item'):
+                        self._index_associated_items(child, item, content)
+                
+                pending_attrs = []
+                attr_start = None
+            
+            elif child.type == 'mod_item':
+                # Handle inline modules
+                name_node = child.child_by_field_name('name')
+                if name_node:
+                    mod_name = name_node.text.decode('utf-8')
+                    body = child.child_by_field_name('body')
+                    if body:
+                        self._index_scope(body, module_path + [mod_name], items, content)
+                
+                pending_attrs = []
+                attr_start = None
+            
             else:
-                pending_attributes = []
+                # Reset pending attrs for non-declaration nodes
+                if child.type not in ('line_comment', 'block_comment'):
+                    pending_attrs = []
+                    attr_start = None
+    
+    def _index_item(
+        self,
+        node: 'Node',
+        module_path: List[str],
+        attrs: List[str],
+        start_byte: int,
+        content: str
+    ) -> Optional[IndexedItem]:
+        """Create an IndexedItem from a tree-sitter node."""
+        item = IndexedItem(
+            kind=node.type,
+            name=None,
+            module_path=list(module_path),
+            start_byte=start_byte,
+            end_byte=node.end_byte,
+            attrs=list(attrs),
+            attrs_fingerprint=' '.join(sorted(attrs)),
+            node=node,
+        )
+        
+        # Extract name based on item kind
+        if node.type == 'impl_item':
+            item.impl_type = self._get_impl_type_name(node)
+            item.impl_trait = self._get_impl_trait_name(node)
+        else:
+            name_node = node.child_by_field_name('name')
+            if name_node:
+                item.name = name_node.text.decode('utf-8')
+        
+        return item
+    
+    def _index_associated_items(
+        self,
+        impl_node: 'Node',
+        parent_item: IndexedItem,
+        content: str
+    ) -> None:
+        """Index associated items within an impl or trait block."""
+        body = impl_node.child_by_field_name('body')
+        if body is None:
+            # Try declaration_list
+            for child in impl_node.children:
+                if child.type == 'declaration_list':
+                    body = child
+                    break
+        
+        if body is None:
+            return
+        
+        pending_attrs: List[str] = []
+        attr_start: Optional[int] = None
+        
+        for child in body.children:
+            if child.type == 'attribute_item':
+                attr_text = content[child.start_byte:child.end_byte].strip()
+                pending_attrs.append(attr_text)
+                if attr_start is None:
+                    attr_start = child.start_byte
+                continue
+            
+            if child.type in RUST_ASSOCIATED_ITEM_TYPES:
+                name_node = child.child_by_field_name('name')
+                if name_node:
+                    assoc_item = IndexedItem(
+                        kind=child.type,
+                        name=name_node.text.decode('utf-8'),
+                        module_path=parent_item.module_path,
+                        start_byte=attr_start if pending_attrs else child.start_byte,
+                        end_byte=child.end_byte,
+                        attrs=list(pending_attrs),
+                        attrs_fingerprint=' '.join(sorted(pending_attrs)),
+                        parent_impl=parent_item,
+                        node=child,
+                    )
+                    parent_item.associated_items.append(assoc_item)
+                
+                pending_attrs = []
+                attr_start = None
+            
+            elif child.type not in ('line_comment', 'block_comment'):
+                pending_attrs = []
+                attr_start = None
+    
+    def _get_impl_type_name(self, impl_node: 'Node') -> Optional[str]:
+        """Extract the type name from an impl block."""
+        type_node = impl_node.child_by_field_name('type')
+        if type_node:
+            if type_node.type == 'type_identifier':
+                return type_node.text.decode('utf-8')
+            elif type_node.type == 'generic_type':
+                ident = type_node.child_by_field_name('type')
+                if ident:
+                    return ident.text.decode('utf-8')
+        
+        # Fallback: scan for type_identifier
+        for child in impl_node.children:
+            if child.type == 'type_identifier':
+                return child.text.decode('utf-8')
+        
+        return None
+    
+    def _get_impl_trait_name(self, impl_node: 'Node') -> Optional[str]:
+        """Extract the trait name from a trait impl block."""
+        trait_node = impl_node.child_by_field_name('trait')
+        if trait_node:
+            if trait_node.type == 'type_identifier':
+                return trait_node.text.decode('utf-8')
+            elif trait_node.type == 'scoped_type_identifier':
+                # e.g., std::fmt::Display
+                return trait_node.text.decode('utf-8')
+            elif trait_node.type == 'generic_type':
+                ident = trait_node.child_by_field_name('type')
+                if ident:
+                    return ident.text.decode('utf-8')
         return None
 
-    def find_declaration(self, content: str, target_path: str) -> Optional[Tuple[int, int]]:
-        """Find a declaration using tree-sitter."""
-        root = self._parse(content)
-        content_bytes = content.encode('utf-8')
-        parts = target_path.split('.')
-        if len(parts) == 1:
-            found = self._find_in_scope(root, parts[0], content_bytes)
-            if found:
-                return (found.start_byte, found.end_byte)
+    # -------------------------------------------------------------------------
+    # Matching
+    # -------------------------------------------------------------------------
+    
+    def _find_matches(
+        self,
+        items: List[IndexedItem],
+        target: TargetPath
+    ) -> List[IndexedItem]:
+        """Find all items matching the target path."""
+        candidates: List[IndexedItem] = []
+        
+        for item in items:
+            if self._item_matches(item, target):
+                candidates.append(item)
+        
+        # Apply occurrence selector if specified
+        if target.occurrence is not None:
+            if 1 <= target.occurrence <= len(candidates):
+                return [candidates[target.occurrence - 1]]
+            return []
+        
+        return candidates
+    
+    def _item_matches(self, item: IndexedItem, target: TargetPath) -> bool:
+        """Check if an item matches the target path."""
+        # Module path prefix match
+        if target.module_path:
+            if item.module_path[:len(target.module_path)] != target.module_path:
+                return False
+        
+        # Attribute filter
+        if not item.matches_attr_filter(target.attr_filter):
+            return False
+        
+        # Impl block target
+        if target.is_impl_target:
+            if target.associated_name:
+                # Looking for an associated item
+                if item.parent_impl is None:
+                    return False
+                if item.name != target.associated_name:
+                    return False
+                
+                parent = item.parent_impl
+                if parent.impl_type != target.impl_type:
+                    return False
+                
+                if target.is_trait_impl:
+                    if parent.impl_trait != target.impl_trait:
+                        return False
+                
+                # Check attr filter against parent impl if specified
+                if target.attr_filter and not parent.matches_attr_filter(target.attr_filter):
+                    return False
+                
+                return True
+            else:
+                # Looking for the impl block itself
+                if item.kind != 'impl_item':
+                    return False
+                if item.impl_type != target.impl_type:
+                    return False
+                if target.is_trait_impl and item.impl_trait != target.impl_trait:
+                    return False
+                return True
+        
+        # Simple item target
+        if target.item_name:
+            return item.name == target.item_name
+        
+        return False
+
+    # -------------------------------------------------------------------------
+    # LanguageHandler Interface
+    # -------------------------------------------------------------------------
+    
+    def find_declaration(
+        self, content: str, target_path: str
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Find declaration(s) matching the target path.
+        
+        Returns the span of the FIRST match. For multi-match operations,
+        use find_all_declarations().
+        """
+        target = parse_target_path(target_path)
+        
+        # Insertion targets don't match existing items
+        if target.is_insertion:
             return None
-        type_name = parts[0]
-        method_name = parts[1]
-        for child in root.children:
-            if child.type == 'impl_item':
-                impl_type = self._get_impl_type_name(child)
-                if impl_type == type_name:
-                    found = self._find_in_scope(child, method_name, content_bytes)
-                    if found:
-                        return (found.start_byte, found.end_byte)
-        current_scope = root
-        for i, part in enumerate(parts):
-            found = self._find_in_scope(current_scope, part, content_bytes)
-            if found is None:
-                return None
-            if i == len(parts) - 1:
-                return (found.start_byte, found.end_byte)
-            else:
-                current_scope = found
-        return None
-
+        
+        items = self._build_item_index(content)
+        matches = self._find_matches(items, target)
+        
+        if not matches:
+            return None
+        
+        # Return first match span
+        return (matches[0].start_byte, matches[0].end_byte)
+    
+    def find_all_declarations(
+        self, content: str, target_path: str
+    ) -> List[Tuple[int, int]]:
+        """Find ALL declarations matching the target path."""
+        target = parse_target_path(target_path)
+        
+        if target.is_insertion:
+            return []
+        
+        items = self._build_item_index(content)
+        matches = self._find_matches(items, target)
+        
+        return [(m.start_byte, m.end_byte) for m in matches]
+    
     def find_header_end(self, content: str) -> int:
-        """
-        Find where the header ends in a Rust file.
-
-        The header includes: use statements, extern crate, mod declarations (without body),
-        top-level const/static, type aliases, and top-level functions.
-
-        The "body" starts at the first struct, enum, impl, trait, or mod with body.
-        """
+        """Find where the header ends (first struct/enum/impl/trait/mod)."""
         root = self._parse(content)
-        first_body_start = len(content)
+        
         for child in root.children:
             if child.type in RUST_BODY_TYPES:
-                if child.start_byte < first_body_start:
-                    first_body_start = child.start_byte
-                break
-        return first_body_start
-
-    def get_declaration_name(self, content: str, start: int, end: int) -> Optional[str]:
+                return child.start_byte
+        
+        return len(content)
+    
+    def get_declaration_name(
+        self, content: str, start: int, end: int
+    ) -> Optional[str]:
         """Extract the declaration name from a code region."""
         snippet = content[start:end]
         root = self._parse(snippet)
+        
         for child in root.children:
             if child.type in RUST_DECL_TYPES:
-                return self._get_node_name(child)
+                if child.type == 'impl_item':
+                    return self._get_impl_type_name(child)
+                name_node = child.child_by_field_name('name')
+                if name_node:
+                    return name_node.text.decode('utf-8')
+        
         return None
+    
+    def get_insertion_point(
+        self, content: str, target_path: str
+    ) -> Optional[int]:
+        """
+        Get the byte offset for inserting new content based on insertion anchor.
+        
+        Returns None if no valid insertion point can be determined.
+        """
+        target = parse_target_path(target_path)
+        
+        if not target.is_insertion:
+            return None
+        
+        items = self._build_item_index(content)
+        
+        if target.insertion_anchor == 'append_file':
+            return len(content)
+        
+        elif target.insertion_anchor == 'append_module':
+            # Find end of current module scope
+            # For root module, this is end of file
+            if not target.module_path:
+                return len(content)
+            # TODO: Find specific module end
+            return len(content)
+        
+        elif target.insertion_anchor in ('insert_before', 'insert_after'):
+            if target.insertion_ref:
+                ref_target = parse_target_path(target.insertion_ref)
+                matches = self._find_matches(items, ref_target)
+                if matches:
+                    if target.insertion_anchor == 'insert_before':
+                        return matches[0].start_byte
+                    else:
+                        return matches[0].end_byte
+        
+        return None
+    
+    def get_impl_block_insertion_point(
+        self, content: str, target_path: str
+    ) -> Optional[int]:
+        """
+        Get insertion point for a new method inside an impl block.
+        
+        Returns byte offset just before the closing brace of the impl block.
+        """
+        target = parse_target_path(target_path)
+        
+        if not target.is_impl_target or not target.associated_name:
+            return None
+        
+        items = self._build_item_index(content)
+        
+        # Find matching impl blocks
+        impl_target = TargetPath(
+            module_path=target.module_path,
+            impl_type=target.impl_type,
+            impl_trait=target.impl_trait,
+            attr_filter=target.attr_filter,
+            occurrence=target.occurrence,
+        )
+        
+        matches = self._find_matches(items, impl_target)
+        
+        if len(matches) == 0:
+            return None
+        
+        if len(matches) > 1 and target.occurrence is None:
+            # Ambiguous: multiple impl blocks match
+            return None
+        
+        impl_item = matches[0]
+        
+        # Find the closing brace
+        if impl_item.node:
+            body = impl_item.node.child_by_field_name('body')
+            if body is None:
+                for child in impl_item.node.children:
+                    if child.type == 'declaration_list':
+                        body = child
+                        break
+            
+            if body:
+                # Insert before closing brace
+                return body.end_byte - 1
+        
+        return None
+    
+    def format_candidates_diagnostic(
+        self, content: str, target_path: str, max_candidates: int = 10
+    ) -> str:
+        """
+        Generate a diagnostic message listing candidate matches.
+        
+        Used for error reporting when no match or ambiguous match.
+        """
+        items = self._build_item_index(content)
+        
+        lines = [f"No match found for target path: {target_path}", "", "Candidates:"]
+        
+        count = 0
+        for item in items:
+            if count >= max_candidates:
+                lines.append(f"  ... and {len(items) - count} more")
+                break
+            
+            path = item.canonical_path
+            attrs = f" {item.attrs_fingerprint}" if item.attrs_fingerprint else ""
+            lines.append(f"  [{item.kind}] {path}{attrs}")
+            
+            # Also list associated items for impl blocks
+            for assoc in item.associated_items[:3]:
+                lines.append(f"    .{assoc.name}")
+            if len(item.associated_items) > 3:
+                lines.append(f"    ... and {len(item.associated_items) - 3} more methods")
+            
+            count += 1
+        
+        return "\n".join(lines)
+
+
+# Register the handler for .rs files if tree-sitter is available
 if TREE_SITTER_AVAILABLE:
     register_handler('.rs', RustHandler())
