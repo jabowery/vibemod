@@ -6,5 +6,7 @@ dependencies:
   - libcst
   - pytest
   - pytest-cov
-  - tree-sitter
-  - tree-sitter-rust
+  - tree_sitter
+  - pip
+  - pip:
+    - tree-sitter-rust
