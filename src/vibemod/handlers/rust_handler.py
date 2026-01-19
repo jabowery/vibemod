@@ -57,6 +57,20 @@ RUST_ASSOCIATED_ITEM_TYPES = frozenset({
     'type_item',
 })
 
+# Item types that must be unique by name within a module scope
+# (excludes impl_item which can have multiple blocks for same type)
+RUST_UNIQUE_ITEM_TYPES = frozenset({
+    'mod_item',
+    'struct_item',
+    'enum_item',
+    'trait_item',
+    'type_item',
+    'function_item',  # Free functions (not methods in impl blocks)
+    'const_item',     # Module-level consts (not associated consts)
+    'static_item',
+    'union_item',
+    'macro_definition',
+})
 
 # =============================================================================
 # TARGET PATH PARSING
