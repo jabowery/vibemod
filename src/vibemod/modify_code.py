@@ -153,6 +153,46 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
 
 def _modify_declaration_python(file_path: str, source: str, dotted_target: str, content: str | None, remove: bool):
     """Python-specific declaration modification using AST."""
+    if remove:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as e:
+            raise ValueError(f'AST parse error in {file_path}') from e
+        parts = dotted_target.split('.')
+        if not parts:
+            raise ValueError('Invalid dotted_target')
+        scope = get_scope(tree, parts[:-1]) if len(parts) > 1 else tree
+        if scope is None:
+            return
+        name = parts[-1]
+        body_to_modify = scope.body if hasattr(scope, 'body') else scope
+        existing_indices = []
+        for i, node in enumerate(body_to_modify):
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+                existing_indices.append(i)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == name:
+                        existing_indices.append(i)
+                        break
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and node.target.id == name:
+                    existing_indices.append(i)
+        if not existing_indices:
+            return
+        for i in sorted(existing_indices, reverse=True):
+            del body_to_modify[i]
+        new_source = ast.unparse(tree) + '\n'
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_source)
+        return
+    if content is None:
+        raise ValueError('Content required for declare operation')
+    from .handlers.python_handler import PythonHandler
+    handler = PythonHandler()
+    single_decl_error = handler.validate_single_declaration(content)
+    if single_decl_error:
+        raise ValueError(f'Invalid declare content:\n{single_decl_error}')
     try:
         tree = ast.parse(source)
     except SyntaxError as e:
@@ -174,62 +214,91 @@ def _modify_declaration_python(file_path: str, source: str, dotted_target: str, 
         raise ValueError('Invalid dotted_target')
     scope = get_scope(tree, parts[:-1]) if len(parts) > 1 else tree
     if scope is None:
-        if remove:
-            return
         raise ValueError(f'Parent scope not found for {dotted_target} in {file_path}')
     name = parts[-1]
     new_node = None
-    if not remove:
-        content = textwrap.dedent(content)
-        try:
-            content_module = ast.parse(content)
-        except SyntaxError as e:
-            raise ValueError('Invalid content syntax') from e
-        body = content_module.body
-        imports_to_add = []
-        while body and isinstance(body[0], (ast.Import, ast.ImportFrom)):
-            imports_to_add.append(body.pop(0))
-        if len(body) != 1:
-            raise ValueError('Content must be a single declaration, optionally preceded by import statements')
-        decl = body[0]
-        if not isinstance(decl, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            raise ValueError('Content must be a class or function definition')
+    is_assignment = False
+    content = textwrap.dedent(content)
+    try:
+        content_module = ast.parse(content)
+    except SyntaxError as e:
+        raise ValueError('Invalid content syntax') from e
+    body = content_module.body
+    imports_to_add = []
+    while body and isinstance(body[0], (ast.Import, ast.ImportFrom)):
+        imports_to_add.append(body.pop(0))
+    while body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body.pop(0)
+    if len(body) != 1:
+        raise ValueError('Content must be a single declaration, optionally preceded by import statements')
+    decl = body[0]
+    if isinstance(decl, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
         if decl.name != name:
             raise ValueError(f'Name mismatch: expected {name}, got {decl.name}')
         new_node = decl
-        if imports_to_add:
+    elif isinstance(decl, (ast.Assign, ast.AnnAssign)):
+        assign_names = handler._get_assignment_names(decl)
+        if name not in assign_names:
+            raise ValueError(f'Name mismatch: expected {name}, got {assign_names}')
+        new_node = decl
+        is_assignment = True
+    else:
+        raise ValueError('Content must be a class, function definition, or assignment')
+    if imports_to_add:
 
-            def get_import_key(node: ast.AST) -> Tuple | None:
-                if isinstance(node, ast.Import):
-                    return ('import', tuple(sorted(((alias.name, alias.asname or '') for alias in node.names))))
-                if isinstance(node, ast.ImportFrom):
-                    module = node.module or ''
-                    return ('from', module, tuple(sorted(((alias.name, alias.asname or '') for alias in node.names))))
-                return None
-            existing_keys = {get_import_key(node) for node in tree.body if get_import_key(node) is not None}
-            insert_idx = 0
-            if tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant) and isinstance(tree.body[0].value.value, str):
-                insert_idx = 1
-            while insert_idx < len(tree.body) and get_import_key(tree.body[insert_idx]) is not None:
+        def get_import_key(node: ast.AST) -> Tuple | None:
+            if isinstance(node, ast.Import):
+                return ('import', tuple(sorted(((alias.name, alias.asname or '') for alias in node.names))))
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ''
+                return ('from', module, tuple(sorted(((alias.name, alias.asname or '') for alias in node.names))))
+            return None
+        existing_keys = {get_import_key(node) for node in tree.body if get_import_key(node) is not None}
+        insert_idx = 0
+        if tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant) and isinstance(tree.body[0].value.value, str):
+            insert_idx = 1
+        while insert_idx < len(tree.body) and get_import_key(tree.body[insert_idx]) is not None:
+            insert_idx += 1
+        for imp in imports_to_add:
+            key = get_import_key(imp)
+            if key and key not in existing_keys:
+                tree.body.insert(insert_idx, imp)
                 insert_idx += 1
-            for imp in imports_to_add:
-                key = get_import_key(imp)
-                if key and key not in existing_keys:
-                    tree.body.insert(insert_idx, imp)
-                    insert_idx += 1
-                    existing_keys.add(key)
+                existing_keys.add(key)
     body_to_modify = scope.body if hasattr(scope, 'body') else scope
-    existing_indices = [i for i, node in enumerate(body_to_modify) if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name]
+    existing_indices = []
+    for i, node in enumerate(body_to_modify):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            existing_indices.append(i)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    existing_indices.append(i)
+                    break
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                existing_indices.append(i)
     for i in sorted(existing_indices, reverse=True):
         del body_to_modify[i]
-    if not remove and new_node is not None:
+    if new_node is not None:
         pos = len(body_to_modify)
         if existing_indices:
             pos = min(existing_indices)
-        else:
+        elif not is_assignment:
             for i, node in enumerate(body_to_modify):
                 if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                     pos = i
+                    break
+        else:
+            pos = 0
+            for i, node in enumerate(body_to_modify):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    pos = i + 1
+                elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                    pos = i + 1
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    pos = i + 1
+                else:
                     break
         body_to_modify.insert(pos, new_node)
     if header_end_line > 0:
