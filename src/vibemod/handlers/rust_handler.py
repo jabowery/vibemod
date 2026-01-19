@@ -218,6 +218,13 @@ class RustHandler(LanguageHandler):
     - Rich error diagnostics
     """
 
+    def _get_children(self, node: 'Node') -> List['Node']:
+        """Get children of a node as a list (handles tree-sitter API differences)."""
+        children = node.children
+        if hasattr(children, '__iter__') and (not isinstance(children, list)):
+            return list(children)
+        return children
+
     def validate_single_declaration(self, content: str) -> Optional[str]:
         """
     Validate that content contains exactly one top-level declaration.
@@ -229,7 +236,7 @@ class RustHandler(LanguageHandler):
             return 'Declare content is empty. Each declare directive must contain exactly one declaration.'
         root = self._parse(content)
         declarations = []
-        for child in root.children:
+        for child in self._get_children(root):
             if child.type in RUST_DECL_TYPES:
                 declarations.append(child)
             elif child.type == 'attribute_item':
@@ -271,7 +278,7 @@ class RustHandler(LanguageHandler):
                 context = context + '...'
             error_text = 'Unexpected syntax' if node.type == 'ERROR' else f'Missing {node.type}'
             errors.append((error_text, line_num, col, context))
-        for child in node.children:
+        for child in self._get_children(node):
             self._collect_errors(child, content, errors)
         return errors
 
@@ -358,7 +365,7 @@ class RustHandler(LanguageHandler):
         pending_attrs: List[str] = []
         attr_start: Optional[int] = None
         doc_comment_start: Optional[int] = None
-        children = list(node.children)
+        children = self._get_children(node)
         for child in children:
             if child.type == 'attribute_item':
                 attr_text = content[child.start_byte:child.end_byte].strip()
@@ -433,7 +440,7 @@ class RustHandler(LanguageHandler):
         """Index associated items within an impl or trait block."""
         body = impl_node.child_by_field_name('body')
         if body is None:
-            for child in impl_node.children:
+            for child in self._get_children(impl_node):
                 if child.type == 'declaration_list':
                     body = child
                     break
@@ -442,7 +449,7 @@ class RustHandler(LanguageHandler):
         pending_attrs: List[str] = []
         attr_start: Optional[int] = None
         doc_comment_start: Optional[int] = None
-        children = list(body.children)
+        children = self._get_children(body)
         for child in children:
             if child.type == 'attribute_item':
                 attr_text = content[child.start_byte:child.end_byte].strip()
@@ -558,11 +565,11 @@ class RustHandler(LanguageHandler):
 
     def find_declaration(self, content: str, target_path: str) -> Optional[Tuple[int, int]]:
         """
-        Find declaration(s) matching the target path.
-        
-        Returns the span of the FIRST match. For multi-match operations,
-        use find_all_declarations().
-        """
+    Find declaration(s) matching the target path.
+
+    Returns the span of the FIRST match. For multi-match operations,
+    use find_all_declarations().
+    """
         target = parse_target_path(target_path)
         if target.is_insertion:
             return None
@@ -584,7 +591,7 @@ class RustHandler(LanguageHandler):
     def find_header_end(self, content: str) -> int:
         """Find where the header ends (first struct/enum/impl/trait/mod)."""
         root = self._parse(content)
-        for child in root.children:
+        for child in self._get_children(root):
             if child.type in RUST_BODY_TYPES:
                 return child.start_byte
         return len(content)
@@ -593,7 +600,7 @@ class RustHandler(LanguageHandler):
         """Extract the declaration name from a code region."""
         snippet = content[start:end]
         root = self._parse(snippet)
-        for child in root.children:
+        for child in self._get_children(root):
             if child.type in RUST_DECL_TYPES:
                 if child.type == 'impl_item':
                     return self._get_impl_type_name(child)
