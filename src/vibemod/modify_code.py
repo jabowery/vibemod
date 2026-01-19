@@ -72,6 +72,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     - Uniqueness validation to prevent illegal duplicates
     - Syntax validation to prevent malformed code
     - Debug dump on syntax errors for easier troubleshooting
+    - Smart attribute handling: preserves original attributes if replacement lacks them
     """
     from .handlers.rust_handler import RustHandler, parse_target_path
     handler = RustHandler()
@@ -89,6 +90,35 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
             raise ValueError(f'Modification would create invalid Rust code:\n{dup_error}')
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
+
+    def content_has_attributes(code: str) -> bool:
+        """Check if code starts with attributes (#[...])."""
+        stripped = code.strip()
+        return stripped.startswith('#[') or stripped.startswith('/// ') or stripped.startswith('//!')
+
+    def adjust_span_for_attributes(span_start: int, span_end: int, new_content: str) -> tuple[int, int]:
+        """
+        Adjust span if original has attributes but replacement doesn't.
+
+        If the original span includes attributes/doc-comments but the new content
+        doesn't start with them, find where the actual declaration starts and
+        adjust the span to preserve the original attributes.
+        """
+        if content_has_attributes(new_content):
+            return (span_start, span_end)
+        original_span_text = source[span_start:span_end]
+        if not content_has_attributes(original_span_text):
+            return (span_start, span_end)
+        temp_root = handler._parse(original_span_text)
+        decl_start_in_span = None
+        for child in temp_root.children:
+            if child.type in ('attribute_item', 'line_comment', 'block_comment'):
+                continue
+            decl_start_in_span = child.start_byte
+            break
+        if decl_start_in_span is not None and decl_start_in_span > 0:
+            return (span_start + decl_start_in_span, span_end)
+        return (span_start, span_end)
     if remove:
         spans = handler.find_all_declarations(source, dotted_target)
         if not spans:
@@ -122,9 +152,10 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     if target.is_impl_target and target.associated_name:
         spans = handler.find_all_declarations(source, dotted_target)
         if spans:
-            spans.sort(key=lambda s: s[0], reverse=True)
+            adjusted_spans = [adjust_span_for_attributes(s, e, content) for s, e in spans]
+            adjusted_spans.sort(key=lambda s: s[0], reverse=True)
             new_source = source
-            for start, end in spans:
+            for start, end in adjusted_spans:
                 new_source = new_source[:start] + content + new_source[end:]
             validate_and_write(new_source)
             return
@@ -142,9 +173,10 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         return
     spans = handler.find_all_declarations(source, dotted_target)
     if spans:
-        spans.sort(key=lambda s: s[0], reverse=True)
+        adjusted_spans = [adjust_span_for_attributes(s, e, content) for s, e in spans]
+        adjusted_spans.sort(key=lambda s: s[0], reverse=True)
         new_source = source
-        for start, end in spans:
+        for start, end in adjusted_spans:
             new_source = new_source[:start] + content + new_source[end:]
         validate_and_write(new_source)
         return
