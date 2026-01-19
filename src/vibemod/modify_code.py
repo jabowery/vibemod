@@ -333,6 +333,93 @@ HEADER_RE_PERMISSIVE = re.compile('^\\s*MMM\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s+MMM\\
 SEP = '@@@@@@'
 ESCAPE = '\\@@@@@@'
 
+
+def _dump_syntax_error_debug(
+    file_path: str,
+    target_path: str, 
+    content: str | None,
+    source_before: str,
+    source_after: str,
+    error_message: str,
+    remove: bool = False
+) -> str:
+    """
+    Dump debugging information when a syntax error is detected.
+    
+    Creates a timestamped subdirectory under "syntax_errors/" with:
+    - directives.txt: The directive being processed
+    - before.rs: File content before modification
+    - after.rs: Attempted content after modification
+    - error.txt: The error message
+    
+    Returns the path to the created directory.
+    """
+    from datetime import datetime
+    
+    # Create syntax_errors directory if needed
+    debug_dir = os.path.join(os.getcwd(), 'syntax_errors')
+    os.makedirs(debug_dir, exist_ok=True)
+    
+    # Create timestamped subdirectory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    # Include a sanitized version of the target for easier identification
+    safe_target = target_path.replace('/', '_').replace('.', '_').replace(':', '_')[:50]
+    subdir_name = f"{timestamp}_{safe_target}"
+    subdir = os.path.join(debug_dir, subdir_name)
+    os.makedirs(subdir, exist_ok=True)
+    
+    # Determine file extension from original file
+    _, ext = os.path.splitext(file_path)
+    if not ext:
+        ext = '.rs'
+    
+    # Write directives.txt
+    directive_type = 'remove_declaration' if remove else 'declare'
+    directives_content = f"""MMM {directive_type} MMM
+{file_path}
+@@@@@@
+{target_path}
+"""
+    if content is not None and not remove:
+        directives_content += f"""@@@@@@
+{content}
+"""
+    
+    with open(os.path.join(subdir, 'directives.txt'), 'w', encoding='utf-8') as f:
+        f.write(directives_content)
+    
+    # Write before file
+    with open(os.path.join(subdir, f'before{ext}'), 'w', encoding='utf-8') as f:
+        f.write(source_before)
+    
+    # Write after file (the invalid result)
+    with open(os.path.join(subdir, f'after{ext}'), 'w', encoding='utf-8') as f:
+        f.write(source_after)
+    
+    # Write error.txt
+    error_content = f"""Syntax Error Debug Dump
+=======================
+
+File: {file_path}
+Target: {target_path}
+Operation: {directive_type}
+Timestamp: {datetime.now().isoformat()}
+
+Error Message:
+{error_message}
+
+Files in this directory:
+- directives.txt: The MMM directive that caused this error
+- before{ext}: The file content before the modification attempt
+- after{ext}: The resulting content that failed validation
+"""
+    
+    with open(os.path.join(subdir, 'error.txt'), 'w', encoding='utf-8') as f:
+        f.write(error_content)
+    
+    return subdir
+
+
 @dataclass
 class CommandBlock:
     """Represents a command with its raw arguments (sections)."""
