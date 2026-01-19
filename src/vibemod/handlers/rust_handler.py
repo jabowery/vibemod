@@ -73,7 +73,7 @@ RUST_ASSOCIATED_ITEM_TYPES = frozenset({
 })
 
 
-
+@dataclass
 class TargetPath:
     """Parsed representation of a vibemod target path for Rust."""
     module_path: List[str] = field(default_factory=list)
