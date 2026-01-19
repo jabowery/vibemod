@@ -450,13 +450,12 @@ class RustHandler(LanguageHandler):
         attr_start: Optional[int] = None
         doc_comment_start: Optional[int] = None
         children = list(body.children)
-        for i, child in enumerate(children):
+        for child in children:
             if child.type == 'attribute_item':
                 attr_text = content[child.start_byte:child.end_byte].strip()
                 pending_attrs.append(attr_text)
                 if attr_start is None:
                     attr_start = child.start_byte
-                doc_comment_start = None
                 continue
             if child.type == 'line_comment':
                 comment_text = content[child.start_byte:child.end_byte]
