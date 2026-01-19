@@ -68,6 +68,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     - Multi-match replace/remove (replaces ALL matches by default)
     - Insertion anchors for new items
     - Rich error diagnostics
+    - Single declaration validation
     - Uniqueness validation to prevent illegal duplicates
     - Syntax validation to prevent malformed code
     """
@@ -101,6 +102,9 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     if content is None:
         raise ValueError('Content required for declare operation')
     content = textwrap.dedent(content).strip()
+    single_decl_error = handler.validate_single_declaration(content)
+    if single_decl_error:
+        raise ValueError(f'Invalid declare content:\n{single_decl_error}')
     if target.is_insertion:
         insertion_point = handler.get_insertion_point(source, dotted_target)
         if insertion_point is None:

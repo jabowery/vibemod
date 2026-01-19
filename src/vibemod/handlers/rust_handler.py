@@ -225,6 +225,42 @@ class RustHandler(LanguageHandler):
     - Rich error diagnostics
     """
 
+    def validate_single_declaration(self, content: str) -> Optional[str]:
+        """
+    Validate that content contains exactly one top-level declaration.
+
+    Returns None if valid, or an error message if invalid.
+    """
+        content = content.strip()
+        if not content:
+            return 'Declare content is empty. Each declare directive must contain exactly one declaration.'
+        root = self._parse(content)
+        declarations = []
+        for child in root.children:
+            if child.type in RUST_DECL_TYPES:
+                declarations.append(child)
+            elif child.type == 'attribute_item':
+                continue
+            elif child.type in ('line_comment', 'block_comment'):
+                continue
+            elif child.type == 'ERROR':
+                return f'Declare content has syntax errors and cannot be parsed.'
+        if len(declarations) == 0:
+            return 'Declare content contains no valid Rust declaration. Expected: fn, struct, enum, impl, trait, mod, type, const, static, or macro.'
+        if len(declarations) > 1:
+            decl_names = []
+            for d in declarations:
+                name_node = d.child_by_field_name('name')
+                if name_node:
+                    decl_names.append(f"{d.type.replace('_item', '')} '{name_node.text.decode('utf-8')}'")
+                elif d.type == 'impl_item':
+                    impl_type = self._get_impl_type_name(d)
+                    decl_names.append(f"impl {impl_type or '?'}")
+                else:
+                    decl_names.append(d.type.replace('_item', ''))
+            return f"Declare content contains {len(declarations)} declarations, but only one is allowed per directive.\nFound: {', '.join(decl_names)}\nSplit these into separate MMM declare MMM blocks."
+        return None
+
     def _collect_errors(self, node: 'Node', content: str, errors: List=None) -> List[tuple]:
         """Recursively collect ERROR and MISSING nodes from parse tree."""
         if errors is None:
