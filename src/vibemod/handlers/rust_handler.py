@@ -364,6 +364,7 @@ class RustHandler(LanguageHandler):
         """Recursively index items in a scope."""
         pending_attrs: List[str] = []
         attr_start: Optional[int] = None
+        doc_comment_start: Optional[int] = None
         children = list(node.children)
         for child in children:
             if child.type == 'attribute_item':
@@ -371,15 +372,35 @@ class RustHandler(LanguageHandler):
                 pending_attrs.append(attr_text)
                 if attr_start is None:
                     attr_start = child.start_byte
+                doc_comment_start = None
+                continue
+            if child.type == 'line_comment':
+                comment_text = content[child.start_byte:child.end_byte]
+                if comment_text.startswith('///') or comment_text.startswith('//!'):
+                    if doc_comment_start is None:
+                        doc_comment_start = child.start_byte
+                continue
+            if child.type == 'block_comment':
+                comment_text = content[child.start_byte:child.end_byte]
+                if comment_text.startswith('/**') or comment_text.startswith('/*!'):
+                    if doc_comment_start is None:
+                        doc_comment_start = child.start_byte
                 continue
             if child.type in RUST_DECL_TYPES:
-                item = self._index_item(child, module_path, pending_attrs, attr_start if pending_attrs else child.start_byte, content)
+                if doc_comment_start is not None:
+                    start_byte = doc_comment_start
+                elif pending_attrs:
+                    start_byte = attr_start
+                else:
+                    start_byte = child.start_byte
+                item = self._index_item(child, module_path, pending_attrs, start_byte, content)
                 if item:
                     items.append(item)
                     if child.type in ('impl_item', 'trait_item'):
                         self._index_associated_items(child, item, content)
                 pending_attrs = []
                 attr_start = None
+                doc_comment_start = None
             elif child.type == 'mod_item':
                 name_node = child.child_by_field_name('name')
                 if name_node:
@@ -389,9 +410,11 @@ class RustHandler(LanguageHandler):
                         self._index_scope(body, module_path + [mod_name], items, content)
                 pending_attrs = []
                 attr_start = None
+                doc_comment_start = None
             elif child.type not in ('line_comment', 'block_comment'):
                 pending_attrs = []
                 attr_start = None
+                doc_comment_start = None
 
     def _index_item(self, node: 'Node', module_path: List[str], attrs: List[str], start_byte: int, content: str) -> Optional[IndexedItem]:
         """Create an IndexedItem from a tree-sitter node."""
@@ -425,23 +448,46 @@ class RustHandler(LanguageHandler):
             return
         pending_attrs: List[str] = []
         attr_start: Optional[int] = None
-        for child in body.children:
+        doc_comment_start: Optional[int] = None
+        children = list(body.children)
+        for i, child in enumerate(children):
             if child.type == 'attribute_item':
                 attr_text = content[child.start_byte:child.end_byte].strip()
                 pending_attrs.append(attr_text)
                 if attr_start is None:
                     attr_start = child.start_byte
+                doc_comment_start = None
+                continue
+            if child.type == 'line_comment':
+                comment_text = content[child.start_byte:child.end_byte]
+                if comment_text.startswith('///') or comment_text.startswith('//!'):
+                    if doc_comment_start is None:
+                        doc_comment_start = child.start_byte
+                continue
+            if child.type == 'block_comment':
+                comment_text = content[child.start_byte:child.end_byte]
+                if comment_text.startswith('/**') or comment_text.startswith('/*!'):
+                    if doc_comment_start is None:
+                        doc_comment_start = child.start_byte
                 continue
             if child.type in RUST_ASSOCIATED_ITEM_TYPES:
                 name_node = child.child_by_field_name('name')
                 if name_node:
-                    assoc_item = IndexedItem(kind=child.type, name=name_node.text.decode('utf-8'), module_path=parent_item.module_path, start_byte=attr_start if pending_attrs else child.start_byte, end_byte=child.end_byte, attrs=list(pending_attrs), attrs_fingerprint=' '.join(sorted(pending_attrs)), parent_impl=parent_item, node=child)
+                    if doc_comment_start is not None:
+                        start_byte = doc_comment_start
+                    elif attr_start is not None:
+                        start_byte = attr_start
+                    else:
+                        start_byte = child.start_byte
+                    assoc_item = IndexedItem(kind=child.type, name=name_node.text.decode('utf-8'), module_path=parent_item.module_path, start_byte=start_byte, end_byte=child.end_byte, attrs=list(pending_attrs), attrs_fingerprint=' '.join(sorted(pending_attrs)), parent_impl=parent_item, node=child)
                     parent_item.associated_items.append(assoc_item)
                 pending_attrs = []
                 attr_start = None
+                doc_comment_start = None
             elif child.type not in ('line_comment', 'block_comment'):
                 pending_attrs = []
                 attr_start = None
+                doc_comment_start = None
 
     def _get_impl_type_name(self, impl_node: 'Node') -> Optional[str]:
         """Extract the type name from an impl block."""
