@@ -74,7 +74,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     - Debug dump on syntax errors for easier troubleshooting
     - Smart attribute handling: preserves original attributes if replacement lacks them
     """
-    from .handlers.rust_handler import RustHandler, parse_target_path
+    from .handlers.rust_handler import RustHandler, parse_target_path, RUST_DECL_TYPES
     handler = RustHandler()
     target = parse_target_path(dotted_target)
     source_before = source
@@ -91,33 +91,45 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
 
-    def content_has_attributes(code: str) -> bool:
-        """Check if code starts with attributes (#[...])."""
-        stripped = code.strip()
-        return stripped.startswith('#[') or stripped.startswith('/// ') or stripped.startswith('//!')
+    def content_starts_with_attr_or_doc(code: str) -> bool:
+        """Check if code starts with attributes (#[...]) or doc comments (///)."""
+        stripped = code.lstrip()
+        return stripped.startswith('#[') or stripped.startswith('///') or stripped.startswith('//!') or stripped.startswith('/**') or stripped.startswith('/*!')
+
+    def find_decl_start_in_span(span_text: str) -> int:
+        """
+        Find where the actual declaration starts in a span that may include
+        doc comments and attributes.
+
+        Returns the byte offset within span_text where the declaration keyword
+        (pub, fn, struct, enum, impl, etc.) begins.
+        """
+        temp_root = handler._parse(span_text)
+        for child in temp_root.children:
+            if child.type in RUST_DECL_TYPES:
+                return child.start_byte
+            if child.type in ('line_comment', 'block_comment', 'attribute_item'):
+                continue
+            if child.type not in ('line_comment', 'block_comment', 'attribute_item'):
+                return child.start_byte
+        return 0
 
     def adjust_span_for_attributes(span_start: int, span_end: int, new_content: str) -> tuple[int, int]:
         """
-        Adjust span if original has attributes but replacement doesn't.
+        Adjust span if original has doc comments/attributes but replacement doesn't.
 
-        If the original span includes attributes/doc-comments but the new content
-        doesn't start with them, find where the actual declaration starts and
-        adjust the span to preserve the original attributes.
+        If the original span includes doc comments/attributes but the new content
+        doesn't start with them, adjust the span to preserve the original 
+        doc comments and attributes, replacing only the declaration itself.
         """
-        if content_has_attributes(new_content):
+        if content_starts_with_attr_or_doc(new_content):
             return (span_start, span_end)
         original_span_text = source[span_start:span_end]
-        if not content_has_attributes(original_span_text):
+        if not content_starts_with_attr_or_doc(original_span_text):
             return (span_start, span_end)
-        temp_root = handler._parse(original_span_text)
-        decl_start_in_span = None
-        for child in temp_root.children:
-            if child.type in ('attribute_item', 'line_comment', 'block_comment'):
-                continue
-            decl_start_in_span = child.start_byte
-            break
-        if decl_start_in_span is not None and decl_start_in_span > 0:
-            return (span_start + decl_start_in_span, span_end)
+        decl_offset = find_decl_start_in_span(original_span_text)
+        if decl_offset > 0:
+            return (span_start + decl_offset, span_end)
         return (span_start, span_end)
     if remove:
         spans = handler.find_all_declarations(source, dotted_target)

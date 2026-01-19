@@ -5,7 +5,7 @@ Rust language handler using tree-sitter-rust.
 Implements the vibemod Rust specification:
 - Extended target path grammar
 - Multi-match replace/remove semantics  
-- Explicit insertion anchors
+- Insertion anchors
 - Signature-based disambiguation
 - Rich error diagnostics
 """
@@ -25,9 +25,9 @@ except ImportError:
 
 
 # =============================================================================
-# RUST DECLARATION TYPES
+# RUST DECLARATION TYPES (exported for use by modify_code.py)
 # =============================================================================
-# Rust declaration node types that we consider "declarations"
+
 RUST_DECL_TYPES = frozenset({
     'function_item',
     'struct_item',
@@ -40,8 +40,6 @@ RUST_DECL_TYPES = frozenset({
     'static_item',
     'union_item',
     'macro_definition',
-    'let_declaration',      # let bindings (rare at module level but possible in const contexts)
-    'expression_statement', # For assignments that are expression statements
 })
 
 # Item types that must be unique by name within a module scope
@@ -59,7 +57,6 @@ RUST_UNIQUE_ITEM_TYPES = frozenset({
     'macro_definition',
 })
 
-
 RUST_BODY_TYPES = frozenset({
     'struct_item',
     'enum_item',
@@ -76,11 +73,7 @@ RUST_ASSOCIATED_ITEM_TYPES = frozenset({
 })
 
 
-# =============================================================================
-# TARGET PATH PARSING
-# =============================================================================
 
-@dataclass
 class TargetPath:
     """Parsed representation of a vibemod target path for Rust."""
     module_path: List[str] = field(default_factory=list)
