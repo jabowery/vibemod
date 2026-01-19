@@ -221,6 +221,48 @@ class RustHandler(LanguageHandler):
     - Rich error diagnostics
     """
 
+    def _collect_errors(self, node: 'Node', content: str, errors: List=None) -> List[tuple]:
+        """Recursively collect ERROR and MISSING nodes from parse tree."""
+        if errors is None:
+            errors = []
+        if node.type == 'ERROR' or node.is_missing:
+            start_point = node.start_point
+            line_num = start_point[0] + 1
+            col = start_point[1] + 1
+            start = max(0, node.start_byte - 20)
+            end = min(len(content), node.end_byte + 20)
+            context = content[start:end].replace('\n', '\\n')
+            if start > 0:
+                context = '...' + context
+            if end < len(content):
+                context = context + '...'
+            error_text = 'Unexpected syntax' if node.type == 'ERROR' else f'Missing {node.type}'
+            errors.append((error_text, line_num, col, context))
+        for child in node.children:
+            self._collect_errors(child, content, errors)
+        return errors
+
+    def validate_syntax(self, content: str) -> Optional[str]:
+        """
+    Validate that the content is syntactically valid Rust.
+
+    Returns None if valid, or an error message describing the syntax error.
+    """
+        root = self._parse(content)
+        errors = self._collect_errors(root, content)
+        if not errors:
+            return None
+        lines = ['Syntax errors detected in resulting code:']
+        for error_text, line_num, col, context in errors[:5]:
+            lines.append(f'  Line {line_num}, column {col}: {error_text}')
+            if context:
+                lines.append(f'    Context: {context}')
+        if len(errors) > 5:
+            lines.append(f'  ... and {len(errors) - 5} more errors')
+        lines.append('')
+        lines.append('The modification has been rejected to prevent invalid code.')
+        return '\n'.join(lines)
+
     def validate_no_illegal_duplicates(self, content: str) -> Optional[str]:
         """
     Validate that the content has no illegal duplicate declarations.
@@ -317,6 +359,14 @@ class RustHandler(LanguageHandler):
         if node.type == 'impl_item':
             item.impl_type = self._get_impl_type_name(node)
             item.impl_trait = self._get_impl_trait_name(node)
+        elif node.type in ('const_item', 'static_item'):
+            name_node = node.child_by_field_name('name')
+            if name_node:
+                item.name = name_node.text.decode('utf-8')
+        elif node.type == 'type_item':
+            name_node = node.child_by_field_name('name')
+            if name_node:
+                item.name = name_node.text.decode('utf-8')
         else:
             name_node = node.child_by_field_name('name')
             if name_node:

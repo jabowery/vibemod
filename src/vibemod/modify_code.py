@@ -69,10 +69,22 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     - Insertion anchors for new items
     - Rich error diagnostics
     - Uniqueness validation to prevent illegal duplicates
+    - Syntax validation to prevent malformed code
     """
     from .handlers.rust_handler import RustHandler, parse_target_path
     handler = RustHandler()
     target = parse_target_path(dotted_target)
+
+    def validate_and_write(new_source: str):
+        """Validate and write the new source, or raise with diagnostics."""
+        syntax_error = handler.validate_syntax(new_source)
+        if syntax_error:
+            raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}')
+        dup_error = handler.validate_no_illegal_duplicates(new_source)
+        if dup_error:
+            raise ValueError(f'Modification would create invalid Rust code:\n{dup_error}')
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_source)
     if remove:
         spans = handler.find_all_declarations(source, dotted_target)
         if not spans:
@@ -84,11 +96,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
             after = new_source[end:].lstrip()
             new_source = before + '\n\n' + after
         new_source = re.sub('\\n{3,}', '\n\n', new_source)
-        error = handler.validate_no_illegal_duplicates(new_source)
-        if error:
-            raise ValueError(f'Modification would create invalid Rust code:\n{error}')
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_source)
+        validate_and_write(new_source)
         return
     if content is None:
         raise ValueError('Content required for declare operation')
@@ -102,11 +110,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         after = source[insertion_point:].lstrip()
         new_source = before + '\n\n' + content + '\n\n' + after
         new_source = re.sub('\\n{3,}', '\n\n', new_source)
-        error = handler.validate_no_illegal_duplicates(new_source)
-        if error:
-            raise ValueError(f'Modification would create invalid Rust code:\n{error}')
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_source)
+        validate_and_write(new_source)
         return
     if target.is_impl_target and target.associated_name:
         spans = handler.find_all_declarations(source, dotted_target)
@@ -115,11 +119,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
             new_source = source
             for start, end in spans:
                 new_source = new_source[:start] + content + new_source[end:]
-            error = handler.validate_no_illegal_duplicates(new_source)
-            if error:
-                raise ValueError(f'Modification would create invalid Rust code:\n{error}')
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(new_source)
+            validate_and_write(new_source)
             return
         insertion_point = handler.get_impl_block_insertion_point(source, dotted_target)
         if insertion_point is None:
@@ -131,11 +131,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         indent = ' ' * (base_indent + 4)
         indented_content = '\n'.join((indent + line if line.strip() else line for line in content.split('\n')))
         new_source = source[:insertion_point] + '\n' + indented_content + '\n' + source[insertion_point:]
-        error = handler.validate_no_illegal_duplicates(new_source)
-        if error:
-            raise ValueError(f'Modification would create invalid Rust code:\n{error}')
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_source)
+        validate_and_write(new_source)
         return
     spans = handler.find_all_declarations(source, dotted_target)
     if spans:
@@ -143,21 +139,13 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         new_source = source
         for start, end in spans:
             new_source = new_source[:start] + content + new_source[end:]
-        error = handler.validate_no_illegal_duplicates(new_source)
-        if error:
-            raise ValueError(f'Modification would create invalid Rust code:\n{error}')
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_source)
+        validate_and_write(new_source)
         return
     if target.is_impl_target and (not target.associated_name):
         diagnostic = handler.format_candidates_diagnostic(source, dotted_target)
         raise ValueError(f"No impl block found for '{dotted_target}'. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
     new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
-    error = handler.validate_no_illegal_duplicates(new_source)
-    if error:
-        raise ValueError(f'Modification would create invalid Rust code:\n{error}')
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(new_source)
+    validate_and_write(new_source)
 
 def _modify_declaration_python(file_path: str, source: str, dotted_target: str, content: str | None, remove: bool):
     """Python-specific declaration modification using AST."""
