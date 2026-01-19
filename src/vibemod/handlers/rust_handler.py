@@ -27,7 +27,7 @@ except ImportError:
 # =============================================================================
 # RUST DECLARATION TYPES
 # =============================================================================
-
+# Rust declaration node types that we consider "declarations"
 RUST_DECL_TYPES = frozenset({
     'function_item',
     'struct_item',
@@ -40,21 +40,8 @@ RUST_DECL_TYPES = frozenset({
     'static_item',
     'union_item',
     'macro_definition',
-})
-
-RUST_BODY_TYPES = frozenset({
-    'struct_item',
-    'enum_item',
-    'impl_item',
-    'trait_item',
-    'mod_item',
-    'union_item',
-})
-
-RUST_ASSOCIATED_ITEM_TYPES = frozenset({
-    'function_item',
-    'const_item', 
-    'type_item',
+    'let_declaration',      # let bindings (rare at module level but possible in const contexts)
+    'expression_statement', # For assignments that are expression statements
 })
 
 # Item types that must be unique by name within a module scope
@@ -71,6 +58,23 @@ RUST_UNIQUE_ITEM_TYPES = frozenset({
     'union_item',
     'macro_definition',
 })
+
+
+RUST_BODY_TYPES = frozenset({
+    'struct_item',
+    'enum_item',
+    'impl_item',
+    'trait_item',
+    'mod_item',
+    'union_item',
+})
+
+RUST_ASSOCIATED_ITEM_TYPES = frozenset({
+    'function_item',
+    'const_item', 
+    'type_item',
+})
+
 
 # =============================================================================
 # TARGET PATH PARSING
