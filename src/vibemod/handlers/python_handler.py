@@ -22,7 +22,7 @@ class PythonHandler(LanguageHandler):
         try:
             tree = ast.parse(content)
         except SyntaxError as e:
-            return f'Declare content has syntax errors: {e}'
+            return f'Invalid content syntax: {e}'
         declarations = []
         for node in tree.body:
             if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
