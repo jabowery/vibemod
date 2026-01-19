@@ -218,6 +218,20 @@ class RustHandler(LanguageHandler):
     - Rich error diagnostics
     """
 
+    def _byte_to_char(self, content: str, byte_offset: int) -> int:
+        """Convert UTF-8 byte offset to Python character offset.
+
+    Tree-sitter returns byte offsets, but Python string indexing uses
+    character offsets. For files with multi-byte UTF-8 characters,
+    these differ. This method converts byte offsets to character offsets.
+    """
+        if byte_offset <= 0:
+            return 0
+        encoded = content.encode('utf-8')
+        if byte_offset >= len(encoded):
+            return len(content)
+        return len(encoded[:byte_offset].decode('utf-8'))
+
     def _get_children(self, node: 'Node') -> List['Node']:
         """Get children of a node as a list (handles tree-sitter API differences)."""
         children = node.children
@@ -269,12 +283,14 @@ class RustHandler(LanguageHandler):
             start_point = node.start_point
             line_num = start_point[0] + 1
             col = start_point[1] + 1
-            start = max(0, node.start_byte - 20)
-            end = min(len(content), node.end_byte + 20)
-            context = content[start:end].replace('\n', '\\n')
-            if start > 0:
+            start_char = self._byte_to_char(content, node.start_byte)
+            end_char = self._byte_to_char(content, node.end_byte)
+            ctx_start = max(0, start_char - 20)
+            ctx_end = min(len(content), end_char + 20)
+            context = content[ctx_start:ctx_end].replace('\n', '\\n')
+            if ctx_start > 0:
                 context = '...' + context
-            if end < len(content):
+            if ctx_end < len(content):
                 context = context + '...'
             error_text = 'Unexpected syntax' if node.type == 'ERROR' else f'Missing {node.type}'
             errors.append((error_text, line_num, col, context))
@@ -368,32 +384,39 @@ class RustHandler(LanguageHandler):
         children = self._get_children(node)
         for child in children:
             if child.type == 'attribute_item':
-                attr_text = content[child.start_byte:child.end_byte].strip()
+                start_char = self._byte_to_char(content, child.start_byte)
+                end_char = self._byte_to_char(content, child.end_byte)
+                attr_text = content[start_char:end_char].strip()
                 pending_attrs.append(attr_text)
                 if attr_start is None:
-                    attr_start = child.start_byte
+                    attr_start = start_char
                 doc_comment_start = None
                 continue
             if child.type == 'line_comment':
-                comment_text = content[child.start_byte:child.end_byte]
+                start_char = self._byte_to_char(content, child.start_byte)
+                end_char = self._byte_to_char(content, child.end_byte)
+                comment_text = content[start_char:end_char]
                 if comment_text.startswith('///') or comment_text.startswith('//!'):
                     if doc_comment_start is None:
-                        doc_comment_start = child.start_byte
+                        doc_comment_start = start_char
                 continue
             if child.type == 'block_comment':
-                comment_text = content[child.start_byte:child.end_byte]
+                start_char = self._byte_to_char(content, child.start_byte)
+                end_char = self._byte_to_char(content, child.end_byte)
+                comment_text = content[start_char:end_char]
                 if comment_text.startswith('/**') or comment_text.startswith('/*!'):
                     if doc_comment_start is None:
-                        doc_comment_start = child.start_byte
+                        doc_comment_start = start_char
                 continue
             if child.type in RUST_DECL_TYPES:
                 if doc_comment_start is not None:
-                    start_byte = doc_comment_start
+                    start_char = doc_comment_start
                 elif pending_attrs:
-                    start_byte = attr_start
+                    start_char = attr_start
                 else:
-                    start_byte = child.start_byte
-                item = self._index_item(child, module_path, pending_attrs, start_byte, content)
+                    start_char = self._byte_to_char(content, child.start_byte)
+                end_char = self._byte_to_char(content, child.end_byte)
+                item = self._index_item(child, module_path, pending_attrs, start_char, end_char, content)
                 if item:
                     items.append(item)
                     if child.type in ('impl_item', 'trait_item'):
@@ -416,9 +439,12 @@ class RustHandler(LanguageHandler):
                 attr_start = None
                 doc_comment_start = None
 
-    def _index_item(self, node: 'Node', module_path: List[str], attrs: List[str], start_byte: int, content: str) -> Optional[IndexedItem]:
-        """Create an IndexedItem from a tree-sitter node."""
-        item = IndexedItem(kind=node.type, name=None, module_path=list(module_path), start_byte=start_byte, end_byte=node.end_byte, attrs=list(attrs), attrs_fingerprint=' '.join(sorted(attrs)), node=node)
+    def _index_item(self, node: 'Node', module_path: List[str], attrs: List[str], start_char: int, end_char: int, content: str) -> Optional[IndexedItem]:
+        """Create an IndexedItem from a tree-sitter node.
+
+    Note: start_char and end_char are character offsets (not byte offsets).
+    """
+        item = IndexedItem(kind=node.type, name=None, module_path=list(module_path), start_byte=start_char, end_byte=end_char, attrs=list(attrs), attrs_fingerprint=' '.join(sorted(attrs)), node=node)
         if node.type == 'impl_item':
             item.impl_type = self._get_impl_type_name(node)
             item.impl_trait = self._get_impl_trait_name(node)
@@ -452,33 +478,40 @@ class RustHandler(LanguageHandler):
         children = self._get_children(body)
         for child in children:
             if child.type == 'attribute_item':
-                attr_text = content[child.start_byte:child.end_byte].strip()
+                start_char = self._byte_to_char(content, child.start_byte)
+                end_char = self._byte_to_char(content, child.end_byte)
+                attr_text = content[start_char:end_char].strip()
                 pending_attrs.append(attr_text)
                 if attr_start is None:
-                    attr_start = child.start_byte
+                    attr_start = start_char
                 continue
             if child.type == 'line_comment':
-                comment_text = content[child.start_byte:child.end_byte]
+                start_char = self._byte_to_char(content, child.start_byte)
+                end_char = self._byte_to_char(content, child.end_byte)
+                comment_text = content[start_char:end_char]
                 if comment_text.startswith('///') or comment_text.startswith('//!'):
                     if doc_comment_start is None:
-                        doc_comment_start = child.start_byte
+                        doc_comment_start = start_char
                 continue
             if child.type == 'block_comment':
-                comment_text = content[child.start_byte:child.end_byte]
+                start_char = self._byte_to_char(content, child.start_byte)
+                end_char = self._byte_to_char(content, child.end_byte)
+                comment_text = content[start_char:end_char]
                 if comment_text.startswith('/**') or comment_text.startswith('/*!'):
                     if doc_comment_start is None:
-                        doc_comment_start = child.start_byte
+                        doc_comment_start = start_char
                 continue
             if child.type in RUST_ASSOCIATED_ITEM_TYPES:
                 name_node = child.child_by_field_name('name')
                 if name_node:
                     if doc_comment_start is not None:
-                        start_byte = doc_comment_start
+                        start_char = doc_comment_start
                     elif attr_start is not None:
-                        start_byte = attr_start
+                        start_char = attr_start
                     else:
-                        start_byte = child.start_byte
-                    assoc_item = IndexedItem(kind=child.type, name=name_node.text.decode('utf-8'), module_path=parent_item.module_path, start_byte=start_byte, end_byte=child.end_byte, attrs=list(pending_attrs), attrs_fingerprint=' '.join(sorted(pending_attrs)), parent_impl=parent_item, node=child)
+                        start_char = self._byte_to_char(content, child.start_byte)
+                    end_char = self._byte_to_char(content, child.end_byte)
+                    assoc_item = IndexedItem(kind=child.type, name=name_node.text.decode('utf-8'), module_path=parent_item.module_path, start_byte=start_char, end_byte=end_char, attrs=list(pending_attrs), attrs_fingerprint=' '.join(sorted(pending_attrs)), parent_impl=parent_item, node=child)
                     parent_item.associated_items.append(assoc_item)
                 pending_attrs = []
                 attr_start = None
@@ -593,7 +626,7 @@ class RustHandler(LanguageHandler):
         root = self._parse(content)
         for child in self._get_children(root):
             if child.type in RUST_BODY_TYPES:
-                return child.start_byte
+                return self._byte_to_char(content, child.start_byte)
         return len(content)
 
     def get_declaration_name(self, content: str, start: int, end: int) -> Optional[str]:
@@ -638,10 +671,10 @@ class RustHandler(LanguageHandler):
 
     def get_impl_block_insertion_point(self, content: str, target_path: str) -> Optional[int]:
         """
-        Get insertion point for a new method inside an impl block.
-        
-        Returns byte offset just before the closing brace of the impl block.
-        """
+    Get insertion point for a new method inside an impl block.
+
+    Returns character offset just before the closing brace of the impl block.
+    """
         target = parse_target_path(target_path)
         if not target.is_impl_target or not target.associated_name:
             return None
@@ -661,7 +694,7 @@ class RustHandler(LanguageHandler):
                         body = child
                         break
             if body:
-                return body.end_byte - 1
+                return self._byte_to_char(content, body.end_byte - 1)
         return None
 
     def format_candidates_diagnostic(self, content: str, target_path: str, max_candidates: int=10) -> str:
