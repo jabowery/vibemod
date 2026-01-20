@@ -705,8 +705,11 @@ def execute_canonical(cmd: str, modargs: List[Any]):
             raise FileNotFoundError(f'File not found: {path}')
         with open(path, 'r', encoding='utf-8') as f:
             existing_content = f.read()
-        if idempotent and existing_content.endswith(content):
-            return
+        if idempotent:
+            content_stripped = content.rstrip()
+            existing_stripped = existing_content.rstrip()
+            if existing_stripped.endswith(content_stripped):
+                return
         if existing_content and (not existing_content.endswith('\n')):
             content = '\n' + content
         with open(path, 'a', encoding='utf-8') as f:
