@@ -701,19 +701,23 @@ def execute_canonical(cmd: str, modargs: List[Any]):
             os.chmod(path, 493)
     elif cmd == 'append_file':
         path, content, idempotent = modargs
-        if not os.path.exists(path):
-            raise FileNotFoundError(f'File not found: {path}')
-        with open(path, 'r', encoding='utf-8') as f:
-            existing_content = f.read()
-        if idempotent:
-            content_stripped = content.rstrip()
-            existing_stripped = existing_content.rstrip()
-            if existing_stripped.endswith(content_stripped):
-                return
-        if existing_content and (not existing_content.endswith('\n')):
-            content = '\n' + content
-        with open(path, 'a', encoding='utf-8') as f:
-            f.write(content)
+        existing_content = ''
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                existing_content = f.read()
+            if idempotent:
+                content_stripped = content.rstrip()
+                existing_stripped = existing_content.rstrip()
+                if existing_stripped.endswith(content_stripped):
+                    return
+            if existing_content and (not existing_content.endswith('\n')):
+                content = '\n' + content
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(content)
+        else:
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
     elif cmd == 'move_file':
         src, dst = modargs
         shutil.move(src, dst)
