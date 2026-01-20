@@ -81,7 +81,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
 
     def validate_and_write(new_source: str):
         """Validate and write the new source, or raise with diagnostics."""
-        syntax_error = handler.validate_syntax(new_source)
+        syntax_error = handler.validate_syntax(new_source, original_content=source_before)
         if syntax_error:
             debug_dir = _dump_syntax_error_debug(file_path=file_path, target_path=dotted_target, content=content, source_before=source_before, source_after=new_source, error_message=syntax_error, remove=remove)
             raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
@@ -96,22 +96,31 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         stripped = code.lstrip()
         return stripped.startswith('#[') or stripped.startswith('///') or stripped.startswith('//!') or stripped.startswith('/**') or stripped.startswith('/*!')
 
+    def byte_to_char_offset(text: str, byte_offset: int) -> int:
+        """Convert UTF-8 byte offset to Python character offset."""
+        if byte_offset <= 0:
+            return 0
+        encoded = text.encode('utf-8')
+        if byte_offset >= len(encoded):
+            return len(text)
+        return len(encoded[:byte_offset].decode('utf-8'))
+
     def find_decl_start_in_span(span_text: str) -> int:
         """
         Find where the actual declaration starts in a span that may include
         doc comments and attributes.
 
-        Returns the byte offset within span_text where the declaration keyword
+        Returns the character offset within span_text where the declaration keyword
         (pub, fn, struct, enum, impl, etc.) begins.
         """
         temp_root = handler._parse(span_text)
         for child in temp_root.children:
             if child.type in RUST_DECL_TYPES:
-                return child.start_byte
+                return byte_to_char_offset(span_text, child.start_byte)
             if child.type in ('line_comment', 'block_comment', 'attribute_item'):
                 continue
             if child.type not in ('line_comment', 'block_comment', 'attribute_item'):
-                return child.start_byte
+                return byte_to_char_offset(span_text, child.start_byte)
         return 0
 
     def adjust_span_for_attributes(span_start: int, span_end: int, new_content: str) -> tuple[int, int]:

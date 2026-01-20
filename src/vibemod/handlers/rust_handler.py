@@ -298,26 +298,38 @@ class RustHandler(LanguageHandler):
             self._collect_errors(child, content, errors)
         return errors
 
-    def validate_syntax(self, content: str) -> Optional[str]:
+    def validate_syntax(self, content: str, original_content: str=None) -> Optional[str]:
         """
-    Validate that the content is syntactically valid Rust.
+    Validate Rust syntax using tree-sitter.
 
-    Returns None if valid, or an error message describing the syntax error.
+    If original_content is provided, only report errors if the modification
+    introduced NEW errors (error count increased). This handles cases where
+    tree-sitter has grammar limitations on valid Rust code (e.g., `&raw` 
+    expressions where `raw` is parsed as a keyword instead of identifier).
+
+    Returns None if valid (or no new errors), or an error message if invalid.
     """
         root = self._parse(content)
         errors = self._collect_errors(root, content)
         if not errors:
             return None
-        lines = ['Syntax errors detected in resulting code:']
+        if original_content is not None:
+            original_root = self._parse(original_content)
+            original_errors = self._collect_errors(original_root, original_content)
+            if len(errors) <= len(original_errors):
+                return None
+            new_error_count = len(errors) - len(original_errors)
+            error_lines = [f'Modification introduced {new_error_count} new syntax error(s):']
+        else:
+            error_lines = ['Syntax errors detected in resulting code:']
         for error_text, line_num, col, context in errors[:5]:
-            lines.append(f'  Line {line_num}, column {col}: {error_text}')
-            if context:
-                lines.append(f'    Context: {context}')
+            error_lines.append(f'  Line {line_num}, column {col}: {error_text}')
+            error_lines.append(f'    Context: {context}')
         if len(errors) > 5:
-            lines.append(f'  ... and {len(errors) - 5} more errors')
-        lines.append('')
-        lines.append('The modification has been rejected to prevent invalid code.')
-        return '\n'.join(lines)
+            error_lines.append(f'  ... and {len(errors) - 5} more errors')
+        error_lines.append('')
+        error_lines.append('The modification has been rejected to prevent invalid code.')
+        return '\n'.join(error_lines)
 
     def validate_no_illegal_duplicates(self, content: str) -> Optional[str]:
         """
