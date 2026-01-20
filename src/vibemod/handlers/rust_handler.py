@@ -302,26 +302,17 @@ class RustHandler(LanguageHandler):
         """
     Validate Rust syntax using tree-sitter.
 
-    If original_content is provided, only report errors if the modification
-    introduced NEW errors (error count increased). This handles cases where
-    tree-sitter has grammar limitations on valid Rust code (e.g., `&raw` 
-    expressions where `raw` is parsed as a keyword instead of identifier).
+    Returns None if valid, or an error message if invalid.
 
-    Returns None if valid (or no new errors), or an error message if invalid.
+    The original_content parameter is accepted for API compatibility but
+    is no longer used now that we use tree-sitter-rust-orchard which
+    correctly parses modern Rust syntax.
     """
         root = self._parse(content)
         errors = self._collect_errors(root, content)
         if not errors:
             return None
-        if original_content is not None:
-            original_root = self._parse(original_content)
-            original_errors = self._collect_errors(original_root, original_content)
-            if len(errors) <= len(original_errors):
-                return None
-            new_error_count = len(errors) - len(original_errors)
-            error_lines = [f'Modification introduced {new_error_count} new syntax error(s):']
-        else:
-            error_lines = ['Syntax errors detected in resulting code:']
+        error_lines = ['Syntax errors detected in resulting code:']
         for error_text, line_num, col, context in errors[:5]:
             error_lines.append(f'  Line {line_num}, column {col}: {error_text}')
             error_lines.append(f'    Context: {context}')
@@ -367,8 +358,8 @@ class RustHandler(LanguageHandler):
         return '\n'.join(lines)
 
     def __init__(self):
-        if not TREE_SITTER_AVAILABLE:
-            raise ImportError('tree-sitter and tree-sitter-rust are required for Rust support. Install with: pip install tree-sitter tree-sitter-rust')
+        import tree_sitter_rust_orchard as tsrust
+        from tree_sitter import Language, Parser
         self._language = Language(tsrust.language())
         self._parser = Parser(self._language)
 
