@@ -9,4 +9,4 @@ dependencies:
   - tree_sitter
   - pip
   - pip:
-    - tree-sitter-rust
+    - tree-sitter-rust-orchard
