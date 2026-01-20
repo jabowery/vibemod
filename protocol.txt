@@ -26,6 +26,7 @@ create_file(file_path, file_content, make_executable=True)
 move_file(src, dst)
 make_directory(path)
 remove_file(path, recursive=False)
+append_file(path, appended_content, idempotent=True)
 
 Code Modifications
 
