@@ -530,12 +530,12 @@ def is_decl(node):
 def canonicalize_command(block: CommandBlock) -> List[Tuple[str, List[Any]]]:
     """
     Transform a CommandBlock into canonical form(s) (command, modargs).
-    
+
     This is the "permissive grammar" that accepts various arities and
     transforms them into the canonical form expected by execute().
-    
+
     For update_header, may return multiple commands: update_header + declare(s).
-    
+
     Returns: List of (command_name, canonical_modargs)
     """
     cmd = block.command
@@ -546,7 +546,7 @@ def canonicalize_command(block: CommandBlock) -> List[Tuple[str, List[Any]]]:
         if arity != 1:
             raise ValueError(f'{cmd} requires exactly 1 argument but got {arity}')
         return [(cmd, [sections[0]])]
-    quirk_commands = ['create_file', 'replace_file_contents', 'update_file', 'replace_file', 'replace_file_contents', 'move_file', 'make_directory', 'remove_file', 'declare', 'update_declaration', 'remove_declaration']
+    quirk_commands = ['create_file', 'replace_file_contents', 'update_file', 'replace_file', 'replace_file_contents', 'move_file', 'make_directory', 'remove_file', 'declare', 'update_declaration', 'remove_declaration', 'append_file']
     if cmd in quirk_commands:
         section0list = sections[0].split()
         if len(section0list) != 1:
@@ -566,6 +566,16 @@ def canonicalize_command(block: CommandBlock) -> List[Tuple[str, List[Any]]]:
             flag_str = sections[2].strip()
             make_exec = parse_bool(flag_str)
         return [('create_file', [path, content, make_exec])]
+    elif cmd == 'append_file':
+        if arity < 2 or arity > 3:
+            raise ValueError(f'{cmd} requires 2 or 3 arguments but got {arity}')
+        path = sections[0].strip()
+        content = sections[1]
+        idempotent = True
+        if arity == 3:
+            flag_str = sections[2].strip()
+            idempotent = parse_bool(flag_str)
+        return [('append_file', [path, content, idempotent])]
     elif cmd == 'move_file':
         if arity != 2:
             raise ValueError(f'{cmd} requires exactly 2 arguments but got {arity}')
@@ -671,6 +681,7 @@ def execute_canonical(cmd: str, modargs: List[Any]):
     All commands must be in their canonical form at this point:
     - modification_description(description)
     - create_file(path, content, make_exec)
+    - append_file(path, content, idempotent)
     - move_file(src, dst)
     - make_directory(path)
     - remove_file(path, recursive)
@@ -688,6 +699,18 @@ def execute_canonical(cmd: str, modargs: List[Any]):
             f.write(content)
         if make_exec and (not sys.platform.startswith('win')):
             os.chmod(path, 493)
+    elif cmd == 'append_file':
+        path, content, idempotent = modargs
+        if not os.path.exists(path):
+            raise FileNotFoundError(f'File not found: {path}')
+        with open(path, 'r', encoding='utf-8') as f:
+            existing_content = f.read()
+        if idempotent and existing_content.endswith(content):
+            return
+        if existing_content and (not existing_content.endswith('\n')):
+            content = '\n' + content
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(content)
     elif cmd == 'move_file':
         src, dst = modargs
         shutil.move(src, dst)
@@ -719,7 +742,7 @@ def execute_canonical(cmd: str, modargs: List[Any]):
 
 def get_touched_files(cmd: str, modargs: List[Any]) -> List[str]:
     """Return list of files touched by this command."""
-    if cmd in ['create_file', 'make_directory', 'remove_file', 'update_header', 'declare', 'remove_declaration']:
+    if cmd in ['create_file', 'append_file', 'make_directory', 'remove_file', 'update_header', 'declare', 'remove_declaration']:
         return [modargs[0]]
     elif cmd == 'move_file':
         return [modargs[0], modargs[1]]
