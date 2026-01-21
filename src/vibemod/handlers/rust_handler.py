@@ -218,6 +218,57 @@ class RustHandler(LanguageHandler):
     - Rich error diagnostics
     """
 
+    def unwrap_method_from_impl(self, content: str, expected_method: str) -> Optional[str]:
+        """
+    If content is an impl block containing a single method matching expected_method,
+    extract and return just the method. Otherwise return None.
+
+    This allows users to write:
+        impl Type {
+            fn method(&self) { ... }
+        }
+    when declaring impl:Type.method, and have it do the right thing.
+    """
+        content = content.strip()
+        root = self._parse(content)
+        impl_node = None
+        for child in self._get_children(root):
+            if child.type == 'impl_item':
+                impl_node = child
+                break
+        if impl_node is None:
+            return None
+        body = impl_node.child_by_field_name('body')
+        if body is None:
+            for child in self._get_children(impl_node):
+                if child.type == 'declaration_list':
+                    body = child
+                    break
+        if body is None:
+            return None
+        methods = []
+        for child in self._get_children(body):
+            if child.type == 'function_item':
+                name_node = child.child_by_field_name('name')
+                if name_node:
+                    method_name = name_node.text.decode('utf-8')
+                    methods.append((method_name, child))
+        if len(methods) == 1 and methods[0][0] == expected_method:
+            node = methods[0][1]
+            start_byte = node.start_byte
+            for child in self._get_children(body):
+                if child.end_byte <= node.start_byte:
+                    if child.type in ('attribute_item', 'line_comment', 'block_comment'):
+                        between_start = child.end_byte
+                        between_end = node.start_byte
+                        between_text = content[self._byte_to_char(content, between_start):self._byte_to_char(content, between_end)]
+                        if between_text.strip() == '' or all((c.type in ('attribute_item', 'line_comment', 'block_comment') for c in self._get_children(body) if child.end_byte <= c.start_byte < node.start_byte)):
+                            start_byte = min(start_byte, child.start_byte)
+            start_char = self._byte_to_char(content, start_byte)
+            end_char = self._byte_to_char(content, node.end_byte)
+            return content[start_char:end_char].strip()
+        return None
+
     def _byte_to_char(self, content: str, byte_offset: int) -> int:
         """Convert UTF-8 byte offset to Python character offset.
 

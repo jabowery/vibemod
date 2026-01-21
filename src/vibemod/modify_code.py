@@ -73,6 +73,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     - Syntax validation to prevent malformed code
     - Debug dump on syntax errors for easier troubleshooting
     - Smart attribute handling: preserves original attributes if replacement lacks them
+    - Tolerant method declaration: unwraps impl blocks when declaring methods
     """
     from .handlers.rust_handler import RustHandler, parse_target_path, RUST_DECL_TYPES
     handler = RustHandler()
@@ -140,6 +141,10 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         if decl_offset > 0:
             return (span_start + decl_offset, span_end)
         return (span_start, span_end)
+    if content is not None and target.is_impl_target and target.associated_name:
+        unwrapped = handler.unwrap_method_from_impl(content, target.associated_name)
+        if unwrapped is not None:
+            content = unwrapped
     if remove:
         spans = handler.find_all_declarations(source, dotted_target)
         if not spans:
