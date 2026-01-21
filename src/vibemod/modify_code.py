@@ -763,7 +763,7 @@ def get_touched_files(cmd: str, modargs: List[Any]) -> List[str]:
 def apply_modspec(spec_file: str):
     """
     Apply a modification specification file.
-    
+
     Process:
     1. Extract command blocks (permissive grammar)
     2. Transform to canonical form
@@ -774,6 +774,7 @@ def apply_modspec(spec_file: str):
     blocks = extract_command_blocks(content)
     canonical_commands: List[Tuple[str, List[Any]]] = []
     for block in blocks:
+        print(f'canonicalize: {block.command}')
         canonical_commands.extend(canonicalize_command(block))
     descriptions: List[str] = []
     touched: set = set()
