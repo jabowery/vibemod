@@ -47,10 +47,14 @@ def _execute_update_header(file_path: str, new_header: str):
     with open(file_path, 'r', encoding='utf-8') as f:
         source = f.read()
     ext = os.path.splitext(file_path)[1]
-    if ext == '.py':
-        _update_header_python(file_path, source, new_header)
-    elif ext == '.rs':
-        _update_header_rust(file_path, source, new_header)
+    if ext in ('.py', '.rs', '.tex'):
+        from .handlers import get_handler
+        handler = get_handler(file_path)
+        header_end = handler.find_header_end(source)
+        new_header_clean = new_header.strip() + '\n\n'
+        new_source = new_header_clean + source[header_end:]
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_source)
     else:
         from .handlers import get_handler
         handler = get_handler(file_path)
