@@ -64,6 +64,8 @@ def _execute_update_header(file_path: str, new_header: str):
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
 
+    validate_and_write(new_source)
+
 def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, content: str | None, remove: bool):
     """
     Rust-specific declaration modification using tree-sitter.
@@ -144,10 +146,12 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         if decl_offset > 0:
             return (span_start + decl_offset, span_end)
         return (span_start, span_end)
+
     if content is not None and target.is_impl_target and target.associated_name:
         unwrapped = handler.unwrap_method_from_impl(content, target.associated_name)
         if unwrapped is not None:
             content = unwrapped
+
     if remove:
         spans = handler.find_all_declarations(source, dotted_target)
         if not spans:
@@ -158,16 +162,19 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
             before = new_source[:start].rstrip()
             after = new_source[end:].lstrip()
             new_source = before + '\n\n' + after
-        new_source = re.sub('\\n{3,}', '\n\n', new_source)
+        new_source = re.sub(r'\n{3,}', '\n\n', new_source)
         validate_and_write(new_source)
         return
+
     if content is None:
         raise ValueError('Content required for declare operation')
+
     content = textwrap.dedent(content).strip()
     single_decl_error = handler.validate_single_declaration(content)
     if single_decl_error:
         debug_dir = _dump_syntax_error_debug(file_path=file_path, target_path=dotted_target, content=content, source_before=source_before, source_after=content, error_message=single_decl_error, remove=remove)
         raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
+
     if target.is_insertion:
         insertion_point = handler.get_insertion_point(source, dotted_target)
         if insertion_point is None:
@@ -176,9 +183,10 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         before = source[:insertion_point].rstrip()
         after = source[insertion_point:].lstrip()
         new_source = before + '\n\n' + content + '\n\n' + after
-        new_source = re.sub('\\n{3,}', '\n\n', new_source)
+        new_source = re.sub(r'\n{3,}', '\n\n', new_source)
         validate_and_write(new_source)
         return
+
     if target.is_impl_target and target.associated_name:
         spans = handler.find_all_declarations(source, dotted_target)
         if spans:
@@ -189,10 +197,12 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
                 new_source = new_source[:start] + content + new_source[end:]
             validate_and_write(new_source)
             return
+
         insertion_point = handler.get_impl_block_insertion_point(source, dotted_target)
         if insertion_point is None:
             diagnostic = handler.format_candidates_diagnostic(source, dotted_target)
             raise ValueError(f"Cannot insert method '{target.associated_name}': no matching impl block found or multiple impl blocks match (use @N selector).\n{diagnostic}")
+        
         line_start = source.rfind('\n', 0, insertion_point) + 1
         line_content = source[line_start:insertion_point]
         base_indent = len(line_content) - len(line_content.lstrip())
@@ -201,6 +211,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         new_source = source[:insertion_point] + '\n' + indented_content + '\n' + source[insertion_point:]
         validate_and_write(new_source)
         return
+
     spans = handler.find_all_declarations(source, dotted_target)
     if spans:
         adjusted_spans = [adjust_span_for_attributes(s, e, content) for s, e in spans]
@@ -210,12 +221,22 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
             new_source = new_source[:start] + content + new_source[end:]
         validate_and_write(new_source)
         return
+    
     if target.is_impl_target and (not target.associated_name):
         diagnostic = handler.format_candidates_diagnostic(source, dotted_target)
         raise ValueError(f"No impl block found for '{dotted_target}'.\nTo add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
+
+    # NEW: Validate that we aren't ignoring a requested context
+    if target.module_path:
+        path_str = '::'.join(target.module_path)
+        raise ValueError(
+            f"Cannot insert declaration '{dotted_target}': The context '{path_str}' was not found.\n"
+            f"Note: VibeMod interprets 'A::B' as item B in module A.\n"
+            f"If you intended to add a method to a struct/enum, use dot syntax (e.g. 'Kernel.diag' or 'impl(Kernel).diag')."
+        )
+
     new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
     validate_and_write(new_source)
-
 def _modify_declaration_python(file_path: str, source: str, dotted_target: str, content: str | None, remove: bool):
     """Python-specific declaration modification using AST."""
     if remove:
