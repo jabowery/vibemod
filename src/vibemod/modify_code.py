@@ -92,7 +92,8 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
             raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
         dup_error = handler.validate_no_illegal_duplicates(new_source)
         if dup_error:
-            raise ValueError(f'Modification would create invalid Rust code:\n{dup_error}')
+            debug_dir = _dump_syntax_error_debug(file_path=file_path, target_path=dotted_target, content=content, source_before=source_before, source_after=new_source, error_message=dup_error, remove=remove)
+            raise ValueError(f'Modification would create invalid Rust code:\n{dup_error}\n\nDebug files written to: {debug_dir}')
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
 
@@ -114,7 +115,6 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         """
         Find where the actual declaration starts in a span that may include
         doc comments and attributes.
-
         Returns the character offset within span_text where the declaration keyword
         (pub, fn, struct, enum, impl, etc.) begins.
         """
@@ -131,7 +131,6 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     def adjust_span_for_attributes(span_start: int, span_end: int, new_content: str) -> tuple[int, int]:
         """
         Adjust span if original has doc comments/attributes but replacement doesn't.
-
         If the original span includes doc comments/attributes but the new content
         doesn't start with them, adjust the span to preserve the original 
         doc comments and attributes, replacing only the declaration itself.
@@ -167,7 +166,8 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
     content = textwrap.dedent(content).strip()
     single_decl_error = handler.validate_single_declaration(content)
     if single_decl_error:
-        raise ValueError(f'Invalid declare content:\n{single_decl_error}')
+        debug_dir = _dump_syntax_error_debug(file_path=file_path, target_path=dotted_target, content=content, source_before=source_before, source_after=content, error_message=single_decl_error, remove=remove)
+        raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
     if target.is_insertion:
         insertion_point = handler.get_insertion_point(source, dotted_target)
         if insertion_point is None:
@@ -212,7 +212,7 @@ def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, co
         return
     if target.is_impl_target and (not target.associated_name):
         diagnostic = handler.format_candidates_diagnostic(source, dotted_target)
-        raise ValueError(f"No impl block found for '{dotted_target}'. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
+        raise ValueError(f"No impl block found for '{dotted_target}'.\nTo add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
     new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
     validate_and_write(new_source)
 
