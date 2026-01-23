@@ -10,3 +10,4 @@ dependencies:
   - pip
   - pip:
     - tree-sitter-rust-orchard
+    - tree-sitter-language-pack
