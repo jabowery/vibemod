@@ -1,6 +1,6 @@
 # TLDR
 
-See [prompt.txt](prompt.txt) that prompts the LLM coding assistant to provide modification directives.
+See [protocol.txt](protocol.txt) that prompts the LLM coding assistant to provide modification directives.
 
 This tool requires you to work in a git repository:
 ```
