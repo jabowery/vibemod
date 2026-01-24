@@ -13,7 +13,7 @@ Implements the vibemod Rust specification:
 import re
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Set
-
+import textwrap
 from .base import LanguageHandler, register_handler
 
 try:
