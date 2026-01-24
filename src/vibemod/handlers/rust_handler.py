@@ -218,6 +218,44 @@ class RustHandler(LanguageHandler):
     - Rich error diagnostics
     """
 
+    def _get_use_declaration_name(self, node: 'Node') -> Optional[str]:
+        """Extract the imported name from a use_declaration node.
+
+    Handles various use patterns:
+    - `use foo::Bar;` -> "Bar"
+    - `use foo::Bar as Baz;` -> "Baz" (the alias)
+    - `pub use kernel::KernelDiag;` -> "KernelDiag"
+    - `use foo::{A, B};` -> None (use_list not supported as single target)
+    - `use foo::*;` -> None (glob imports not supported as single target)
+    """
+        for child in self._get_children(node):
+            if child.type == 'use_as_clause':
+                alias = child.child_by_field_name('alias')
+                if alias:
+                    return alias.text.decode('utf-8')
+        arg = node.child_by_field_name('argument')
+        if arg is None:
+            for child in self._get_children(node):
+                if child.type in ('scoped_identifier', 'identifier', 'scoped_use_list', 'use_wildcard'):
+                    arg = child
+                    break
+        if arg is None:
+            return None
+        if arg.type == 'identifier':
+            return arg.text.decode('utf-8')
+        elif arg.type == 'scoped_identifier':
+            name = arg.child_by_field_name('name')
+            if name:
+                return name.text.decode('utf-8')
+            for child in reversed(self._get_children(arg)):
+                if child.type == 'identifier':
+                    return child.text.decode('utf-8')
+        elif arg.type == 'scoped_use_list':
+            return None
+        elif arg.type == 'use_wildcard':
+            return None
+        return None
+
     def unwrap_method_from_impl(self, content: str, expected_method: str) -> Optional[str]:
         """
     If content is an impl block containing a single method matching expected_method,
@@ -311,18 +349,21 @@ class RustHandler(LanguageHandler):
             elif child.type == 'ERROR':
                 return f'Declare content has syntax errors and cannot be parsed.'
         if len(declarations) == 0:
-            return 'Declare content contains no valid Rust declaration. Expected: fn, struct, enum, impl, trait, mod, type, const, static, or macro.'
+            return 'Declare content contains no valid Rust declaration. Expected: fn, struct, enum, impl, trait, mod, type, const, static, macro, or use.'
         if len(declarations) > 1:
             decl_names = []
             for d in declarations:
                 name_node = d.child_by_field_name('name')
                 if name_node:
-                    decl_names.append(f"{d.type.replace('_item', '')} '{name_node.text.decode('utf-8')}'")
+                    decl_names.append(f"{d.type.replace('_item', '').replace('_declaration', '')} '{name_node.text.decode('utf-8')}'")
                 elif d.type == 'impl_item':
                     impl_type = self._get_impl_type_name(d)
                     decl_names.append(f"impl {impl_type or '?'}")
+                elif d.type == 'use_declaration':
+                    use_name = self._get_use_declaration_name(d)
+                    decl_names.append(f"use '{use_name or '?'}'")
                 else:
-                    decl_names.append(d.type.replace('_item', ''))
+                    decl_names.append(d.type.replace('_item', '').replace('_declaration', ''))
             return f"Declare content contains {len(declarations)} declarations, but only one is allowed per directive.\nFound: {', '.join(decl_names)}\nSplit these into separate MMM declare MMM blocks."
         return None
 
@@ -497,11 +538,15 @@ class RustHandler(LanguageHandler):
         """Create an IndexedItem from a tree-sitter node.
 
     Note: start_char and end_char are character offsets (not byte offsets).
+    The IndexedItem fields are still named start_byte/end_byte for compatibility,
+    but they now store character offsets.
     """
         item = IndexedItem(kind=node.type, name=None, module_path=list(module_path), start_byte=start_char, end_byte=end_char, attrs=list(attrs), attrs_fingerprint=' '.join(sorted(attrs)), node=node)
         if node.type == 'impl_item':
             item.impl_type = self._get_impl_type_name(node)
             item.impl_trait = self._get_impl_trait_name(node)
+        elif node.type == 'use_declaration':
+            item.name = self._get_use_declaration_name(node)
         elif node.type in ('const_item', 'static_item'):
             name_node = node.child_by_field_name('name')
             if name_node:
