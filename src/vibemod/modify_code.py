@@ -64,7 +64,7 @@ def _execute_update_header(file_path: str, new_header: str):
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_source)
 
-    validate_and_write(new_source)
+#    validate_and_write(new_source)
 
 def _modify_declaration_rust(file_path: str, source: str, dotted_target: str, content: str | None, remove: bool):
     """
