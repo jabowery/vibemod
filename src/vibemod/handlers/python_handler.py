@@ -21,6 +21,15 @@ PYTHON_BODY_TYPES = frozenset({
 class PythonHandler(LanguageHandler):
     """Handler for Python source files using Python's built-in ast module."""
 
+    def content_starts_with_attr_or_doc(self, code: str) -> bool:
+        """Check if code starts with decorators or docstrings."""
+        stripped = code.lstrip()
+        return stripped.startswith('@') or stripped.startswith('"""') or stripped.startswith("'''")
+
+    def get_decl_types(self) -> frozenset:
+        """Return Python declaration node types."""
+        return PYTHON_DECL_TYPES
+
     def validate_syntax(self, content: str, original_content: str=None) -> Optional[str]:
         """Validate Python syntax using tree-sitter.
 
