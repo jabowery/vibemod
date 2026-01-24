@@ -40,6 +40,7 @@ RUST_DECL_TYPES = frozenset({
     'static_item',
     'union_item',
     'macro_definition',
+    'use_declaration',
 })
 
 # Item types that must be unique by name within a module scope
@@ -55,6 +56,11 @@ RUST_UNIQUE_ITEM_TYPES = frozenset({
     'static_item',
     'union_item',
     'macro_definition',
+    # Note: use_declaration is NOT included here because you can have multiple
+    # use statements importing different items with the same final name from
+    # different modules, e.g.:
+    #   use foo::Thing;
+    #   use bar::Thing as BarThing;
 })
 
 RUST_BODY_TYPES = frozenset({
