@@ -21,6 +21,66 @@ PYTHON_BODY_TYPES = frozenset({
 class PythonHandler(LanguageHandler):
     """Handler for Python source files using Python's built-in ast module."""
 
+    def _find_node_in_scope(self, scope_node: 'Node', parts: List[str], content: str) -> Optional['Node']:
+        """Find the node corresponding to a dotted path."""
+        if not parts:
+            return scope_node
+            
+        target_name = parts[0]
+        remaining = parts[1:]
+        
+        for child in self._get_children(scope_node):
+            if child.type not in PYTHON_DECL_TYPES:
+                continue
+            name = self._get_declaration_name(child, content)
+            if name == target_name:
+                if remaining:
+                    body = child.child_by_field_name('body')
+                    if body:
+                        return self._find_node_in_scope(body, remaining, content)
+                    return None
+                else:
+                    return child
+        return None
+
+    def _insert_nested_declaration(self, source: str, target_path: str, content: str) -> Optional[str]:
+        """Insert a declaration into a nested scope (e.g. method in class)."""
+        parts = target_path.split('.')
+        if len(parts) < 2:
+            return None
+            
+        parent_parts = parts[:-1]
+        root = self._parse(source)
+        parent_node = self._find_node_in_scope(root, parent_parts, source)
+        
+        if not parent_node:
+            return None
+            
+        body = parent_node.child_by_field_name('body')
+        if not body:
+            return None
+            
+        children = self._get_children(body)
+        if not children:
+            # Fallback for empty bodies not strictly handled here
+            return None
+            
+        # Determine indentation from first child of the block
+        first_child = children[0]
+        base_indent_col = first_child.start_point[1]
+        indent_str = ' ' * base_indent_col
+        
+        # Indent the content to match the block
+        indented_content = textwrap.indent(content, indent_str)
+        
+        # Insert after the last child of the block
+        last_child = children[-1]
+        insert_char = self._byte_to_char(source, last_child.end_byte)
+        
+        new_source = source[:insert_char] + '\n\n' + indented_content + source[insert_char:]
+        return new_source
+
+
     def content_starts_with_attr_or_doc(self, code: str) -> bool:
         """Check if code starts with decorators or docstrings."""
         stripped = code.lstrip()
@@ -382,6 +442,14 @@ class PythonHandler(LanguageHandler):
                 new_source = new_source[:start] + content + new_source[end:]
             return validate_and_return(new_source)
 
+        # --- CHANGED: Try nested insertion first ---
+        if '.' in target_path:
+            nested_source = self._insert_nested_declaration(source, target_path, content)
+            if nested_source is not None:
+                return validate_and_return(nested_source)
+        # -------------------------------------------
+
         new_source = self.insert_new_declaration(source, content)
         return validate_and_return(new_source)
+
 register_handler('.py', PythonHandler())
