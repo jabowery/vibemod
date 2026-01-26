@@ -44,18 +44,13 @@ def _dump_syntax_error_debug(file_path: str, target_path: str, content: str, sou
     safe_target = re.sub(r'[^\w\-.]', '_', target_path)[:50]
     dir_name = f'{timestamp}_{safe_target}'
 
-    # Try to get cwd, fall back to file's directory or /tmp
-    try:
-        base_dir = os.getcwd()
-    except (FileNotFoundError, OSError):
-        base_dir = os.path.dirname(os.path.abspath(file_path)) or '/tmp'
-
-    debug_dir = os.path.join(base_dir, 'syntax_errors', dir_name)
+    debug_dir = os.path.join('/tmp', 'vibemod_syntax_errors', dir_name)
     os.makedirs(debug_dir, exist_ok=True)
+
+    print(f'Syntax error debug files written to: {debug_dir}', file=sys.stderr)
 
     ext = os.path.splitext(file_path)[1] or '.txt'
 
-    # Write the directive
     directive_file = os.path.join(debug_dir, 'directives.txt')
     op = 'remove_declaration' if remove else 'declare'
     with open(directive_file, 'w', encoding='utf-8') as f:
@@ -69,7 +64,6 @@ def _dump_syntax_error_debug(file_path: str, target_path: str, content: str, sou
             if not content.endswith('\n'):
                 f.write('\n')
 
-    # Write before/after files
     before_file = os.path.join(debug_dir, f'before{ext}')
     with open(before_file, 'w', encoding='utf-8') as f:
         f.write(source_before)
@@ -78,7 +72,6 @@ def _dump_syntax_error_debug(file_path: str, target_path: str, content: str, sou
     with open(after_file, 'w', encoding='utf-8') as f:
         f.write(source_after)
 
-    # Write error description
     error_file = os.path.join(debug_dir, 'error.txt')
     with open(error_file, 'w', encoding='utf-8') as f:
         f.write('Syntax Error Debug Dump\n')
