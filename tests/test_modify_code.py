@@ -1088,16 +1088,16 @@ More random text
             execute_canonical("update_header", ["/nonexistent/file.py", "# header"])
     
     def test_declare_invalid_python_raises(self):
-        """Test that invalid Python syntax in declare raises error."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = os.path.join(tmpdir, "test.py")
-            with open(file_path, 'w') as f:
-                f.write("# Empty module\n")
-            
-            invalid_code = "def func(\n    # Missing closing paren"
-            
-            with pytest.raises(ValueError, match="Invalid content syntax"):
-                execute_canonical("declare", [file_path, "func", invalid_code])
+    """Test that invalid Python syntax in declare raises error."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = os.path.join(tmpdir, "test.py")
+        with open(file_path, 'w') as f:
+            f.write("# Empty module\n")
+
+        invalid_code = "def func(\n    # Missing closing paren"
+
+        with pytest.raises(ValueError, match="syntax errors"):
+            execute_canonical("declare", [file_path, "func", invalid_code])
 
 
 if __name__ == "__main__":
