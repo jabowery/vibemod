@@ -289,23 +289,23 @@ class PythonHandler(LanguageHandler):
         return new_header_clean + source[header_end:]
 
 
-def insert_new_declaration(self, source: str, content: str) -> str:
-    """Insert a new declaration at the header_end position.
+    def insert_new_declaration(self, source: str, content: str) -> str:
+        """Insert a new declaration at the header_end position.
 
-    Places new declarations after imports but before existing
-    class/function definitions.
-    """
-    header_end = self.find_header_end(source)
-    before = source[:header_end].rstrip()
-    after = source[header_end:].lstrip()
-    if after:
-        new_source = before + '\n\n' + content + '\n\n' + after
-    else:
-        new_source = before + '\n\n' + content + '\n' if before else content + '\n'
-    # Collapse multiple blank lines
-    import re
-    new_source = re.sub('\n\n\n+', '\n\n', new_source)
-    return new_source
+        Places new declarations after imports but before existing
+        class/function definitions.
+        """
+        header_end = self.find_header_end(source)
+        before = source[:header_end].rstrip()
+        after = source[header_end:].lstrip()
+        if after:
+            new_source = before + '\n\n' + content + '\n\n' + after
+        else:
+            new_source = before + '\n\n' + content + '\n' if before else content + '\n'
+        # Collapse multiple blank lines
+        import re
+        new_source = re.sub('\n\n\n+', '\n\n', new_source)
+        return new_source
 
     def modify_declaration(
         self,
