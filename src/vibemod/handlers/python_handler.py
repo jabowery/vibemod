@@ -277,20 +277,15 @@ class PythonHandler(LanguageHandler):
         except SyntaxError:
             pass
         return None
+
+    def update_header(self, source: str, new_header: str) -> str:
+        """
+        Replace the header section of a Python source file.
+
+        The header is everything before the first class or function definition.
+        """
+        header_end = self.find_header_end(source)
+        new_header_clean = new_header.strip() + '\n\n'
+        return new_header_clean + source[header_end:]
+
 register_handler('.py', PythonHandler())
-
-def update_header(self, source: str, new_header: str) -> str:
-    """
-    Replace the header section of a Python source file.
-
-    The header is everything before the first class or function definition.
-    """
-    header_end = self.find_header_end(source)
-    new_header_clean = new_header.strip() + '\n\n'
-    return new_header_clean + source[header_end:]
-
-def update_header(self, source: str, new_header: str) -> str:
-    """Replace the header section of a Python source file."""
-    header_end = self.find_header_end(source)
-    new_header_clean = new_header.strip() + '\n\n'
-    return new_header_clean + source[header_end:]
