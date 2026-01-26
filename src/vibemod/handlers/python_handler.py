@@ -2,7 +2,7 @@
 """Python language handler using tree-sitter."""
 
 from typing import Optional, Tuple, List
-
+import textwrap
 from .base import LanguageHandler, register_handler
 
 PYTHON_DECL_TYPES = frozenset({
