@@ -33,43 +33,68 @@ HEADER_RE_PERMISSIVE = re.compile('^\\s*MMM\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s+MMM\\
 SEP = '@@@@@@'
 ESCAPE = '\\@@@@@@'
 
-def _dump_syntax_error_debug(file_path: str, target_path: str, content: str | None, source_before: str, source_after: str, error_message: str, remove: bool=False) -> str:
+def _dump_syntax_error_debug(file_path: str, target_path: str, content: str, source_before: str, source_after: str, error_message: str, remove: bool) -> str:
     """
-    Dump debugging information when a syntax error is detected.
-    
-    Creates a timestamped subdirectory under "syntax_errors/" with:
-    - directives.txt: The directive being processed
-    - before.rs: File content before modification
-    - after.rs: Attempted content after modification
-    - error.txt: The error message
-    
-    Returns the path to the created directory.
+    Dump debug information when a syntax error is detected.
+
+    Returns the path to the debug directory.
     """
     from datetime import datetime
-    debug_dir = os.path.join(os.getcwd(), 'syntax_errors')
-    os.makedirs(debug_dir, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    safe_target = target_path.replace('/', '_').replace('.', '_').replace(':', '_')[:50]
-    subdir_name = f'{timestamp}_{safe_target}'
-    subdir = os.path.join(debug_dir, subdir_name)
-    os.makedirs(subdir, exist_ok=True)
-    _, ext = os.path.splitext(file_path)
-    if not ext:
-        ext = '.rs'
-    directive_type = 'remove_declaration' if remove else 'declare'
-    directives_content = f'MMM {directive_type} MMM\n{file_path}\n@@@@@@\n{target_path}\n'
-    if content is not None and (not remove):
-        directives_content += f'@@@@@@\n{content}\n'
-    with open(os.path.join(subdir, 'directives.txt'), 'w', encoding='utf-8') as f:
-        f.write(directives_content)
-    with open(os.path.join(subdir, f'before{ext}'), 'w', encoding='utf-8') as f:
+    safe_target = re.sub(r'[^\w\-.]', '_', target_path)[:50]
+    dir_name = f'{timestamp}_{safe_target}'
+
+    # Try to get cwd, fall back to file's directory or /tmp
+    try:
+        base_dir = os.getcwd()
+    except (FileNotFoundError, OSError):
+        base_dir = os.path.dirname(os.path.abspath(file_path)) or '/tmp'
+
+    debug_dir = os.path.join(base_dir, 'syntax_errors', dir_name)
+    os.makedirs(debug_dir, exist_ok=True)
+
+    ext = os.path.splitext(file_path)[1] or '.txt'
+
+    # Write the directive
+    directive_file = os.path.join(debug_dir, 'directives.txt')
+    op = 'remove_declaration' if remove else 'declare'
+    with open(directive_file, 'w', encoding='utf-8') as f:
+        f.write(f'MMM {op} MMM\n')
+        f.write(f'{file_path}\n')
+        f.write('@@@@@@\n')
+        f.write(f'{target_path}\n')
+        f.write('@@@@@@\n')
+        if content:
+            f.write(content)
+            if not content.endswith('\n'):
+                f.write('\n')
+
+    # Write before/after files
+    before_file = os.path.join(debug_dir, f'before{ext}')
+    with open(before_file, 'w', encoding='utf-8') as f:
         f.write(source_before)
-    with open(os.path.join(subdir, f'after{ext}'), 'w', encoding='utf-8') as f:
+
+    after_file = os.path.join(debug_dir, f'after{ext}')
+    with open(after_file, 'w', encoding='utf-8') as f:
         f.write(source_after)
-    error_content = f'Syntax Error Debug Dump\n=======================\n\nFile: {file_path}\nTarget: {target_path}\nOperation: {directive_type}\nTimestamp: {datetime.now().isoformat()}\n\nError Message:\n{error_message}\n\nFiles in this directory:\n- directives.txt: The MMM directive that caused this error\n- before{ext}: The file content before the modification attempt\n- after{ext}: The resulting content that failed validation\n'
-    with open(os.path.join(subdir, 'error.txt'), 'w', encoding='utf-8') as f:
-        f.write(error_content)
-    return subdir
+
+    # Write error description
+    error_file = os.path.join(debug_dir, 'error.txt')
+    with open(error_file, 'w', encoding='utf-8') as f:
+        f.write('Syntax Error Debug Dump\n')
+        f.write('=======================\n\n')
+        f.write(f'File: {file_path}\n')
+        f.write(f'Target: {target_path}\n')
+        f.write(f'Operation: {op}\n')
+        f.write(f'Timestamp: {datetime.now().isoformat()}\n\n')
+        f.write('Error Message:\n')
+        f.write(error_message)
+        f.write('\n\nFiles in this directory:\n')
+        f.write('- directives.txt: The MMM directive that caused this error\n')
+        f.write(f'- before{ext}: The file content before the modification attempt\n')
+        f.write(f'- after{ext}: The resulting content that failed validation\n')
+
+    return debug_dir
 
 @dataclass
 class CommandBlock:
