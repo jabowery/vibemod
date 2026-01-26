@@ -78,6 +78,29 @@ RUST_ASSOCIATED_ITEM_TYPES = frozenset({
 })
 
 def normalize_target_path(self, target_path: str, content: str = None) -> str:
+    """Normalize a target path by stripping redundant type prefixes."""
+    target = target_path.strip()
+    simple_prefixes = [
+        'fn ', 'struct ', 'enum ', 'const ', 'static ',
+        'type ', 'trait ', 'mod ', 'use ', 'pub fn ',
+        'pub struct ', 'pub enum ', 'pub const ', 'pub static ',
+        'pub type ', 'pub trait ', 'pub mod ', 'pub use ',
+        'async fn ', 'pub async fn '
+    ]
+    for prefix in simple_prefixes:
+        if target.lower().startswith(prefix.lower()):
+            name = target[len(prefix):].strip()
+            if '(' in name:
+                name = name[:name.index('(')].strip()
+            if '<' in name:
+                name = name[:name.index('<')].strip()
+            return name
+    if target.lower().startswith('impl '):
+        rest = target[5:].strip()
+        return 'impl:' + rest
+    return target
+
+def normalize_target_path(self, target_path: str, content: str = None) -> str:
     """
     Normalize a target path by stripping redundant type prefixes.
 
