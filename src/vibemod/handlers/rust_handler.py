@@ -23,7 +23,6 @@ try:
 except ImportError:
     TREE_SITTER_AVAILABLE = False
 
-
 # =============================================================================
 # RUST DECLARATION TYPES (exported for use by modify_code.py)
 # =============================================================================
@@ -78,6 +77,57 @@ RUST_ASSOCIATED_ITEM_TYPES = frozenset({
     'type_item',
 })
 
+def normalize_target_path(self, target_path: str, content: str = None) -> str:
+    """
+    Normalize a target path by stripping redundant type prefixes.
+
+    Handles cases where user specifies:
+    - "fn foo()" or "fn foo" -> "foo"
+    - "struct Foo" -> "Foo"
+    - "enum Bar" -> "Bar"
+    - "const FOO" -> "FOO"
+    - "static BAR" -> "BAR"
+    - "type Alias" -> "Alias"
+    - "trait Tr" -> "Tr"
+    - "mod m" -> "m"
+    - "use foo::Bar" -> "Bar"
+    - "impl Foo" -> "impl:Foo"
+    - "impl Trait for Foo" -> "impl:Trait for Foo"
+
+    If content is provided, validates that the prefix matches the content type.
+    """
+    target = target_path.strip()
+
+    # Map of keyword prefixes to their normalized form
+    # None means just strip the prefix and use the name
+    # 'impl' means convert to impl: syntax
+    simple_prefixes = ['fn ', 'struct ', 'enum ', 'const ', 'static ', 
+                      'type ', 'trait ', 'mod ', 'use ', 'pub fn ',
+                      'pub struct ', 'pub enum ', 'pub const ', 'pub static ',
+                      'pub type ', 'pub trait ', 'pub mod ', 'pub use ',
+                      'async fn ', 'pub async fn ']
+
+    for prefix in simple_prefixes:
+        if target.lower().startswith(prefix.lower()):
+            name = target[len(prefix):].strip()
+            # Strip parentheses and parameters if present (e.g., "foo()" -> "foo")
+            if '(' in name:
+                name = name[:name.index('(')].strip()
+            # Strip generics if present (e.g., "Foo<T>" -> "Foo")
+            if '<' in name:
+                name = name[:name.index('<')].strip()
+            return name
+
+    # Handle "impl Type" or "impl Trait for Type"
+    if target.lower().startswith('impl '):
+        rest = target[5:].strip()
+        # Check for "impl Trait for Type"
+        if ' for ' in rest.lower():
+            return 'impl:' + rest
+        else:
+            return 'impl:' + rest
+
+    return target
 
 @dataclass
 class TargetPath:
@@ -242,96 +292,155 @@ class RustHandler(LanguageHandler):
             return name_node.text.decode('utf-8')
         return None
 
-    def modify_declaration(self, file_path: str, source: str, target_path: str, content: Optional[str], remove: bool, debug_dump_func=None) -> str:
-        """
+    def modify_declaration(
+    self,
+    file_path: str,
+    source: str,
+    target_path: str,
+    content: Optional[str],
+    remove: bool,
+    debug_dump_func=None
+) -> str:
+    """
     Rust-specific declaration modification.
 
     Extends base class to handle:
     - impl block method insertion
     - Rust-specific target path parsing (impl:Type.method)
+    - Tolerant target syntax (fn foo(), struct Bar, etc.)
     """
-        source_before = source
-        target = parse_target_path(target_path)
+    source_before = source
 
-        def validate_and_return(new_source: str) -> str:
-            syntax_error = self.validate_syntax(new_source, original_content=source_before)
-            if syntax_error:
-                if debug_dump_func:
-                    debug_dir = debug_dump_func(file_path=file_path, target_path=target_path, content=content, source_before=source_before, source_after=new_source, error_message=syntax_error, remove=remove)
-                    raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
-                raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}')
-            dup_error = self.validate_no_illegal_duplicates(new_source)
-            if dup_error:
-                raise ValueError(f'Modification would create invalid Rust code:\n{dup_error}')
-            return new_source
-        if remove:
-            spans = self.find_all_declarations(source, target_path)
-            if not spans:
-                return source
-            spans.sort(key=lambda s: s[0], reverse=True)
-            new_source = source
-            for start, end in spans:
-                before = new_source[:start].rstrip()
-                after = new_source[end:].lstrip()
-                new_source = before + '\n\n' + after
-            new_source = re.sub('\\n{3,}', '\n\n', new_source)
-            return validate_and_return(new_source)
-        if content is None:
-            raise ValueError('Content required for declare operation')
-        content = textwrap.dedent(content).strip()
-        if target.is_impl_target and target.associated_name:
-            unwrapped = self.unwrap_method_from_impl(content, target.associated_name)
-            if unwrapped is not None:
-                content = unwrapped
-        single_decl_error = self.validate_single_declaration(content)
-        if single_decl_error:
+    # Normalize target path to handle "fn foo()" -> "foo" etc.
+    target_path = self.normalize_target_path(target_path, content)
+    target = parse_target_path(target_path)
+
+    def validate_and_return(new_source: str) -> str:
+        syntax_error = self.validate_syntax(new_source, original_content=source_before)
+        if syntax_error:
             if debug_dump_func:
-                debug_dir = debug_dump_func(file_path=file_path, target_path=target_path, content=content, source_before=source_before, source_after=content, error_message=single_decl_error, remove=remove)
-                raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
-            raise ValueError(f'Invalid declare content:\n{single_decl_error}')
-        if target.is_insertion:
-            insertion_point = self.get_insertion_point(source, target_path)
-            if insertion_point is None:
-                diagnostic = self.format_candidates_diagnostic(source, target_path)
-                raise ValueError(f'Cannot determine insertion point.\n{diagnostic}')
-            before = source[:insertion_point].rstrip()
-            after = source[insertion_point:].lstrip()
-            new_source = before + '\n\n' + content + '\n\n' + after
-            new_source = re.sub('\\n{3,}', '\n\n', new_source)
-            return validate_and_return(new_source)
-        if target.is_impl_target and target.associated_name:
-            spans = self.find_all_declarations(source, target_path)
-            if spans:
-                adjusted_spans = [self.adjust_span_for_attributes(source, s, e, content) for s, e in spans]
-                adjusted_spans.sort(key=lambda s: s[0], reverse=True)
-                new_source = source
-                for start, end in adjusted_spans:
-                    new_source = new_source[:start] + content + new_source[end:]
-                return validate_and_return(new_source)
-            insertion_point = self.get_impl_block_insertion_point(source, target_path)
-            if insertion_point is None:
-                diagnostic = self.format_candidates_diagnostic(source, target_path)
-                raise ValueError(f"Cannot insert method '{target.associated_name}': no matching impl block found or multiple impl blocks match (use @N selector).\n{diagnostic}")
-            line_start = source.rfind('\n', 0, insertion_point) + 1
-            line_content = source[line_start:insertion_point]
-            base_indent = len(line_content) - len(line_content.lstrip())
-            indent = ' ' * (base_indent + 4)
-            indented_content = '\n'.join((indent + line if line.strip() else line for line in content.split('\n')))
-            new_source = source[:insertion_point] + '\n' + indented_content + '\n' + source[insertion_point:]
-            return validate_and_return(new_source)
+                debug_dir = debug_dump_func(
+                    file_path=file_path,
+                    target_path=target_path,
+                    content=content,
+                    source_before=source_before,
+                    source_after=new_source,
+                    error_message=syntax_error,
+                    remove=remove
+                )
+                raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
+            raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}')
+
+        dup_error = self.validate_no_illegal_duplicates(new_source)
+        if dup_error:
+            raise ValueError(f'Modification would create invalid Rust code:\n{dup_error}')
+
+        return new_source
+
+    # Handle removal
+    if remove:
+        spans = self.find_all_declarations(source, target_path)
+        if not spans:
+            return source
+        spans.sort(key=lambda s: s[0], reverse=True)
+        new_source = source
+        for start, end in spans:
+            before = new_source[:start].rstrip()
+            after = new_source[end:].lstrip()
+            new_source = before + '\n\n' + after
+        new_source = re.sub('\n\n\n+', '\n\n', new_source)
+        return validate_and_return(new_source)
+
+    if content is None:
+        raise ValueError('Content required for declare operation')
+
+    content = textwrap.dedent(content).strip()
+
+    # Unwrap method from impl block if user wrapped it
+    if target.is_impl_target and target.associated_name:
+        unwrapped = self.unwrap_method_from_impl(content, target.associated_name)
+        if unwrapped is not None:
+            content = unwrapped
+
+    single_decl_error = self.validate_single_declaration(content)
+    if single_decl_error:
+        if debug_dump_func:
+            debug_dir = debug_dump_func(
+                file_path=file_path,
+                target_path=target_path,
+                content=content,
+                source_before=source_before,
+                source_after=content,
+                error_message=single_decl_error,
+                remove=remove
+            )
+            raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
+        raise ValueError(f'Invalid declare content:\n{single_decl_error}')
+
+    # Handle insertion anchors
+    if target.is_insertion:
+        insertion_point = self.get_insertion_point(source, target_path)
+        if insertion_point is None:
+            diagnostic = self.format_candidates_diagnostic(source, target_path)
+            raise ValueError(f'Cannot determine insertion point.\n{diagnostic}')
+        before = source[:insertion_point].rstrip()
+        after = source[insertion_point:].lstrip()
+        new_source = before + '\n\n' + content + '\n\n' + after
+        new_source = re.sub('\n\n\n+', '\n\n', new_source)
+        return validate_and_return(new_source)
+
+    # Handle impl method targets
+    if target.is_impl_target and target.associated_name:
         spans = self.find_all_declarations(source, target_path)
         if spans:
-            adjusted_spans = [self.adjust_span_for_attributes(source, s, e, content) for s, e in spans]
+            adjusted_spans = [
+                self.adjust_span_for_attributes(source, s, e, content)
+                for s, e in spans
+            ]
             adjusted_spans.sort(key=lambda s: s[0], reverse=True)
             new_source = source
             for start, end in adjusted_spans:
                 new_source = new_source[:start] + content + new_source[end:]
             return validate_and_return(new_source)
-        if target.is_impl_target and (not target.associated_name):
+
+        # No existing method - insert into impl block
+        insertion_point = self.get_impl_block_insertion_point(source, target_path)
+        if insertion_point is None:
             diagnostic = self.format_candidates_diagnostic(source, target_path)
-            raise ValueError(f"No impl block found for '{target_path}'. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
-        new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
+            raise ValueError(f"Cannot insert method '{target.associated_name}': no matching impl block found or multiple impl blocks match (use @N selector).\n{diagnostic}")
+
+        line_start = source.rfind('\n', 0, insertion_point) + 1
+        line_content = source[line_start:insertion_point]
+        base_indent = len(line_content) - len(line_content.lstrip())
+        indent = ' ' * (base_indent + 4)
+        indented_content = '\n'.join(
+            indent + line if line.strip() else line
+            for line in content.split('\n')
+        )
+        new_source = source[:insertion_point] + '\n' + indented_content + '\n' + source[insertion_point:]
         return validate_and_return(new_source)
+
+    # Standard declaration replacement
+    spans = self.find_all_declarations(source, target_path)
+    if spans:
+        adjusted_spans = [
+            self.adjust_span_for_attributes(source, s, e, content)
+            for s, e in spans
+        ]
+        adjusted_spans.sort(key=lambda s: s[0], reverse=True)
+        new_source = source
+        for start, end in adjusted_spans:
+            new_source = new_source[:start] + content + new_source[end:]
+        return validate_and_return(new_source)
+
+    # Handle impl block without method (error case)
+    if target.is_impl_target and not target.associated_name:
+        diagnostic = self.format_candidates_diagnostic(source, target_path)
+        raise ValueError(f"No impl block found for '{target_path}'. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
+
+    # Append new declaration to file
+    new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
+    return validate_and_return(new_source)
 
     def unwrap_content_if_needed(self, content: str, target_path: str) -> str:
         """Unwrap method from impl block if user wrapped it unnecessarily."""
