@@ -511,7 +511,45 @@ class TestExecuteCanonical:
         assert os.path.exists(dst_path)
         with open(dst_path) as f:
             assert f.read() == "content"
-    
+
+
+    def test_declare_new_method_in_existing_class(self):
+        """Test that declaring a new method inserts it inside the class, not at module level."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "test.py")
+            with open(file_path, 'w') as f:
+                f.write(textwrap.dedent("""
+                    class MyClass:
+                        def existing_method(self):
+                            pass
+                """).strip())
+            
+            new_method = textwrap.dedent("""
+                def new_method(self):
+                    return 42
+            """).strip()
+            
+            execute_canonical("declare", [file_path, "MyClass.new_method", new_method])
+            
+            with open(file_path, 'r') as f:
+                result = f.read()
+            
+            # The new method must appear inside the class, not at module level
+            class_start = result.find("class MyClass:")
+            new_method_start = result.find("def new_method")
+            class_end_approx = result.rfind("pass") + 4  # after existing_method's pass
+            
+            assert new_method_start != -1, "New method was not inserted"
+            assert new_method_start > class_start, "New method should be after class definition"
+            
+            # Check indentation - method should be indented (inside class)
+            lines = result.split('\n')
+            for line in lines:
+                if 'def new_method' in line:
+                    indent = len(line) - len(line.lstrip())
+                    assert indent >= 4, f"Method should be indented inside class, but has indent={indent}"
+                    break
+
     def test_update_header_simple(self, temp_dir):
         """Test updating module header."""
         file_path = os.path.join(temp_dir, "module.py")
