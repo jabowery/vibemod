@@ -289,3 +289,99 @@ class PythonHandler(LanguageHandler):
         return new_header_clean + source[header_end:]
 
 register_handler('.py', PythonHandler())
+
+def insert_new_declaration(self, source: str, content: str) -> str:
+    """Insert a new declaration at the header_end position.
+
+    Places new declarations after imports but before existing
+    class/function definitions.
+    """
+    header_end = self.find_header_end(source)
+    before = source[:header_end].rstrip()
+    after = source[header_end:].lstrip()
+    if after:
+        new_source = before + '\n\n' + content + '\n\n' + after
+    else:
+        new_source = before + '\n\n' + content + '\n' if before else content + '\n'
+    # Collapse multiple blank lines
+    import re
+    new_source = re.sub('\n\n\n+', '\n\n', new_source)
+    return new_source
+
+def modify_declaration(
+    self,
+    file_path: str,
+    source: str,
+    target_path: str,
+    content: Optional[str],
+    remove: bool,
+    debug_dump_func=None
+) -> str:
+    """Python-specific declaration modification."""
+    source_before = source
+
+    def validate_and_return(new_source: str) -> str:
+        syntax_error = self.validate_syntax(new_source, original_content=source_before)
+        if syntax_error:
+            if debug_dump_func:
+                debug_dir = debug_dump_func(
+                    file_path=file_path,
+                    target_path=target_path,
+                    content=content,
+                    source_before=source_before,
+                    source_after=new_source,
+                    error_message=syntax_error,
+                    remove=remove
+                )
+                raise ValueError(f'Modification would create syntactically invalid Python code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
+            raise ValueError(f'Modification would create syntactically invalid Python code:\n{syntax_error}')
+        return new_source
+
+    if remove:
+        spans = self.find_all_declarations(source, target_path)
+        if not spans:
+            return source
+        spans.sort(key=lambda s: s[0], reverse=True)
+        new_source = source
+        for start, end in spans:
+            before = new_source[:start].rstrip()
+            after = new_source[end:].lstrip()
+            new_source = before + '\n\n' + after
+        import re
+        new_source = re.sub('\n\n\n+', '\n\n', new_source)
+        return validate_and_return(new_source)
+
+    if content is None:
+        raise ValueError('Content required for declare operation')
+
+    content = textwrap.dedent(content).strip()
+
+    single_decl_error = self.validate_single_declaration(content)
+    if single_decl_error:
+        if debug_dump_func:
+            debug_dir = debug_dump_func(
+                file_path=file_path,
+                target_path=target_path,
+                content=content,
+                source_before=source_before,
+                source_after=content,
+                error_message=single_decl_error,
+                remove=remove
+            )
+            raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
+        raise ValueError(f'Invalid declare content:\n{single_decl_error}')
+
+    spans = self.find_all_declarations(source, target_path)
+    if spans:
+        adjusted_spans = [
+            self.adjust_span_for_attributes(source, s, e, content)
+            for s, e in spans
+        ]
+        adjusted_spans.sort(key=lambda s: s[0], reverse=True)
+        new_source = source
+        for start, end in adjusted_spans:
+            new_source = new_source[:start] + content + new_source[end:]
+        return validate_and_return(new_source)
+
+    new_source = self.insert_new_declaration(source, content)
+    return validate_and_return(new_source)
