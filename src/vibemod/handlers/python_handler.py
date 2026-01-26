@@ -288,3 +288,9 @@ def update_header(self, source: str, new_header: str) -> str:
     header_end = self.find_header_end(source)
     new_header_clean = new_header.strip() + '\n\n'
     return new_header_clean + source[header_end:]
+
+def update_header(self, source: str, new_header: str) -> str:
+    """Replace the header section of a Python source file."""
+    header_end = self.find_header_end(source)
+    new_header_clean = new_header.strip() + '\n\n'
+    return new_header_clean + source[header_end:]
