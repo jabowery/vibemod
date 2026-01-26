@@ -958,3 +958,13 @@ class RustHandler(LanguageHandler):
         return '\n'.join(lines)
 if TREE_SITTER_AVAILABLE:
     register_handler('.rs', RustHandler())
+
+def update_header(self, source: str, new_header: str) -> str:
+    """
+    Replace the header section of a Rust source file.
+
+    The header is everything before the first major declaration.
+    """
+    header_end = self.find_header_end(source)
+    new_header_clean = new_header.strip() + '\n\n'
+    return new_header_clean + source[header_end:]
