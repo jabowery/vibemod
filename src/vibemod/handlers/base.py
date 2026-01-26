@@ -224,3 +224,21 @@ def get_handler(file_path: str) -> 'LanguageHandler':
         supported = ', '.join(sorted(_HANDLERS.keys()))
         raise ValueError(f"Unsupported file extension '{ext}' for file '{file_path}'. Supported extensions: {supported}")
     return _HANDLERS[ext]
+
+def update_header(self, source: str, new_header: str) -> str:
+    """
+    Replace the header section of a source file.
+
+    The header is everything before the first major declaration
+    (class, function, etc.).
+
+    Args:
+        source: Current file content
+        new_header: New header content
+
+    Returns:
+        Modified source code
+    """
+    header_end = self.find_header_end(source)
+    new_header_clean = new_header.strip() + '\n\n'
+    return new_header_clean + source[header_end:]

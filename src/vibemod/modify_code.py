@@ -8,60 +8,21 @@ import textwrap
 from dataclasses import dataclass
 from typing import List, Tuple, Any
 
-def _update_header_rust(file_path: str, source: str, new_header: str):
-    """Rust-specific header update using tree-sitter."""
-    from .handlers import get_handler
-    handler = get_handler(file_path)
-    header_end = handler.find_header_end(source)
-    new_header_clean = new_header.strip() + '\n\n'
-    new_source = new_header_clean + source[header_end:]
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(new_source)
-
-def _update_header_python(file_path: str, source: str, new_header: str):
-    """Python-specific header update."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as e:
-        raise ValueError(f'AST parse error in {file_path}') from e
-    decl_nodes = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))]
-    if not decl_nodes:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_header + '\n')
-        return
-    first_decl_lineno = min((node.lineno for node in decl_nodes))
-    lines = source.splitlines(keepends=True)
-    decl_and_after = lines[first_decl_lineno - 1:]
-    new_header_lines = new_header.splitlines(keepends=True)
-    if new_header and (not new_header.endswith(('\n', '\r\n'))):
-        new_header_lines[-1] += '\n'
-    new_source = ''.join(new_header_lines + decl_and_after)
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(new_source)
-
 def _execute_update_header(file_path: str, new_header: str):
     """Execute update_header command with language-aware dispatch."""
+    from .handlers import get_handler
+
     if not os.path.exists(file_path):
         raise FileNotFoundError(f'File not found: {file_path}')
+
     with open(file_path, 'r', encoding='utf-8') as f:
         source = f.read()
-    ext = os.path.splitext(file_path)[1]
-    if ext in ('.py', '.rs', '.tex'):
-        from .handlers import get_handler
-        handler = get_handler(file_path)
-        header_end = handler.find_header_end(source)
-        new_header_clean = new_header.strip() + '\n\n'
-        new_source = new_header_clean + source[header_end:]
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_source)
-    else:
-        from .handlers import get_handler
-        handler = get_handler(file_path)
-        header_end = handler.find_header_end(source)
-        new_header_clean = new_header.strip() + '\n\n'
-        new_source = new_header_clean + source[header_end:]
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(new_source)
+
+    handler = get_handler(file_path)
+    new_source = handler.update_header(source, new_header)
+
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(new_source)
 
 def run_git(cmd, check=True):
     result = subprocess.run(['git'] + cmd, capture_output=True, text=True)
