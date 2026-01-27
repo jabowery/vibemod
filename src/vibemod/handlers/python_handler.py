@@ -496,4 +496,71 @@ class PythonHandler(LanguageHandler):
                 result_lines.append('')
         
         return '\n'.join(result_lines)
+
+    def get_class_body_insertion_point(self, content: str, class_name: str) -> Optional[int]:
+        """Find insertion point for a new method inside a class.
+        
+        Returns character offset just before the class's closing (at end of body),
+        or None if class not found.
+        """
+        root = self._parse(content)
+        
+        for child in self._get_children(root):
+            if child.type == 'class_definition':
+                name_node = child.child_by_field_name('name')
+                if name_node and name_node.text.decode('utf-8') == class_name:
+                    body = child.child_by_field_name('body')
+                    if body:
+                        # Return position at end of body (before closing)
+                        return self._byte_to_char(content, body.end_byte)
+            elif child.type == 'decorated_definition':
+                for subchild in self._get_children(child):
+                    if subchild.type == 'class_definition':
+                        name_node = subchild.child_by_field_name('name')
+                        if name_node and name_node.text.decode('utf-8') == class_name:
+                            body = subchild.child_by_field_name('body')
+                            if body:
+                                return self._byte_to_char(content, body.end_byte)
+        return None
+
+    def get_class_body_indent(self, content: str, class_name: str) -> int:
+        """Get the indentation level for methods inside a class.
+        
+        Returns number of spaces for method indentation.
+        """
+        root = self._parse(content)
+        
+        for child in self._get_children(root):
+            node = child
+            if child.type == 'decorated_definition':
+                for subchild in self._get_children(child):
+                    if subchild.type == 'class_definition':
+                        node = subchild
+                        break
+            
+            if node.type == 'class_definition':
+                name_node = node.child_by_field_name('name')
+                if name_node and name_node.text.decode('utf-8') == class_name:
+                    body = node.child_by_field_name('body')
+                    if body:
+                        # Find first statement in body to determine indent
+                        for stmt in self._get_children(body):
+                            if stmt.type not in ('comment', 'expression_statement'):
+                                start_char = self._byte_to_char(content, stmt.start_byte)
+                                line_start = content.rfind('\n', 0, start_char) + 1
+                                line_content = content[line_start:start_char]
+                                return len(line_content)
+                            elif stmt.type == 'expression_statement':
+                                # Could be docstring, check indent anyway
+                                start_char = self._byte_to_char(content, stmt.start_byte)
+                                line_start = content.rfind('\n', 0, start_char) + 1
+                                line_content = content[line_start:start_char]
+                                return len(line_content)
+                        # Empty body or only pass, use default 4 spaces more than class
+                        class_start = self._byte_to_char(content, node.start_byte)
+                        line_start = content.rfind('\n', 0, class_start) + 1
+                        class_indent = class_start - line_start
+                        return class_indent + 4
+        return 4  # Default
+
 register_handler('.py', PythonHandler())
