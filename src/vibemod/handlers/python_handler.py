@@ -370,48 +370,7 @@ class PythonHandler(LanguageHandler):
 
 
 
-    def _reindent_content(self, content: str, target_indent: int) -> str:
-        """Re-indent content to a target indentation level.
-        
-        Preserves the relative indentation structure within the content
-        while adjusting the base indentation to match the target location.
-        
-        Args:
-            content: The dedented code content (first line has 0 indent)
-            target_indent: The number of spaces for the base indentation level
-        
-        Returns:
-            Content with adjusted indentation
-        """
-        lines = content.split('\n')
-        if not lines:
-            return content
-        
-        # Find minimum indent of non-empty lines to determine the base
-        min_indent = None
-        for line in lines:
-            if line.strip():
-                line_indent = len(line) - len(line.lstrip())
-                if min_indent is None or line_indent < min_indent:
-                    min_indent = line_indent
-        
-        if min_indent is None:
-            min_indent = 0
-        
-        # Re-indent: remove min_indent, add target_indent
-        # This preserves relative structure
-        result_lines = []
-        for line in lines:
-            if line.strip():
-                # Calculate this line's relative indent from base
-                line_indent = len(line) - len(line.lstrip())
-                relative_indent = line_indent - min_indent
-                new_indent = target_indent + relative_indent
-                result_lines.append(' ' * new_indent + line.lstrip())
-            else:
-                result_lines.append('')
-        
-        return '\n'.join(result_lines)
+
 
     def modify_declaration(
         self,
@@ -486,15 +445,28 @@ class PythonHandler(LanguageHandler):
             adjusted_spans.sort(key=lambda s: s[0], reverse=True)
             new_source = source
             for start, end in adjusted_spans:
-                # Detect the indentation of the original declaration
+                # Check if there's already indentation before the start position
                 line_start = new_source.rfind('\n', 0, start) + 1
-                original_indent = start - line_start
+                existing_indent = start - line_start
                 
-                # Re-indent the content to match
-                indented_content = self._reindent_content(content, original_indent)
+                # Re-indent the content to match the target indentation level
+                # This ensures lines 2+ are correctly indented relative to the file structure
+                full_indented_content = self._reindent_content(content, existing_indent)
+                
+                # The first line is already indented in the source file (new_source[:start])
+                # So we must strip the indentation from the first line of our replacement
+                # to avoid doubling it.
+                if full_indented_content:
+                    lines = full_indented_content.split('\n')
+                    # Only lstrip the first line to remove the base indentation we just added
+                    # while preserving the rest of the block's relative indentation
+                    lines[0] = lines[0].lstrip()
+                    indented_content = '\n'.join(lines)
+                else:
+                    indented_content = full_indented_content
+
                 new_source = new_source[:start] + indented_content + new_source[end:]
-            return validate_and_return(new_source)
-        
+            return validate_and_return(new_source)        
         # No existing declaration - check if this is a class method target
         parts = target_path.split('.')
         if len(parts) == 2:
@@ -513,6 +485,39 @@ class PythonHandler(LanguageHandler):
         new_source = self.insert_new_declaration(source, content)
         return validate_and_return(new_source)
 
+    def _reindent_content(self, content: str, target_indent: int) -> str:
+        """Re-indent content to a target indentation level.
+        
+        Preserves the relative indentation structure within the content
+        while adjusting the base indentation to match the target location.
+        """
+        # Dedent to normalize - removes common leading whitespace
+        dedented = textwrap.dedent(content)
+        lines = dedented.split('\n')
+        
+        if not lines:
+            return content
+        
+        # Remove leading/trailing empty lines
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        
+        if not lines:
+            return content
+        
+        # Re-indent with target_indent as the base
+        result_lines = []
+        for line in lines:
+            if line.strip():
+                current_indent = len(line) - len(line.lstrip())
+                new_indent = target_indent + current_indent
+                result_lines.append(' ' * new_indent + line.lstrip())
+            else:
+                result_lines.append('')
+        
+        return '\n'.join(result_lines)
 
     def get_class_body_insertion_point(self, content: str, class_name: str) -> Optional[int]:
         """Find insertion point for a new method inside a class.
