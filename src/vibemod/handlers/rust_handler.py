@@ -587,38 +587,36 @@ class RustHandler(LanguageHandler):
         
         return None
 
+
+
     def find_symbol_in_scope(self, content: str, scope_start: int, scope_end: int, symbol_name: str, symbol_type: SymbolType) -> Optional[Tuple[int, int]]:
         """Find an existing symbol declaration within a scope."""
         scope_content = content[scope_start:scope_end]
         root = self._parse(scope_content)
-        
-        def search_block(node):
+
+        def check_node(node) -> Optional[Tuple[int, int]]:
+            # Check if this node is a matching declaration
+            if node.type == 'let_declaration':
+                stmt_start = self._byte_to_char(scope_content, node.start_byte)
+                stmt_end = self._byte_to_char(scope_content, node.end_byte)
+                stmt_text = scope_content[stmt_start:stmt_end]
+
+                stmt_type = self.get_symbol_type(stmt_text)
+                stmt_name = self.get_symbol_name(stmt_text)
+
+                if stmt_name == symbol_name and self.symbols_conflict(stmt_type, symbol_type):
+                    return (scope_start + stmt_start, scope_start + stmt_end)
+
+            # Recurse into children
             for child in self._get_children(node):
-                if child.type == 'block':
-                    for stmt in self._get_children(child):
-                        result = check_statement(stmt)
-                        if result:
-                            return result
-                elif child.type in ('let_declaration', 'const_item', 'static_item',
-                                   'function_item', 'struct_item', 'enum_item'):
-                    result = check_statement(child)
-                    if result:
-                        return result
+                result = check_node(child)
+                if result:
+                    return result
+
             return None
-        
-        def check_statement(stmt):
-            stmt_start = self._byte_to_char(scope_content, stmt.start_byte)
-            stmt_end = self._byte_to_char(scope_content, stmt.end_byte)
-            stmt_text = scope_content[stmt_start:stmt_end]
-            
-            stmt_type = self.get_symbol_type(stmt_text)
-            stmt_name = self.get_symbol_name(stmt_text)
-            
-            if stmt_name == symbol_name and self.symbols_conflict(stmt_type, symbol_type):
-                return (scope_start + stmt_start, scope_start + stmt_end)
-            return None
-        
-        return search_block(root)
+
+        return check_node(root)
+
 
     def get_scope_indent(self, content: str, scope_start: int, scope_end: int) -> int:
         """Get the indentation level for statements in a scope."""
