@@ -368,6 +368,35 @@ class PythonHandler(LanguageHandler):
         return new_source
 
 
+    def _reindent_content(self, content: str, target_indent: int) -> str:
+        """Re-indent content to a target indentation level.
+        
+        Preserves the relative indentation structure within the content
+        while adjusting the base indentation to match the target location.
+        
+        Args:
+            content: The dedented code content
+            target_indent: The number of spaces for the base indentation level
+        
+        Returns:
+            Content with adjusted indentation
+        """
+        lines = content.split('\n')
+        if not lines:
+            return content
+        
+        # Content is already dedented, so first non-empty line has 0 indent
+        # Just add target_indent to each line
+        result_lines = []
+        target_spaces = ' ' * target_indent
+        for line in lines:
+            if line.strip():
+                result_lines.append(target_spaces + line)
+            else:
+                result_lines.append('')
+        
+        return '\n'.join(result_lines)
+
     def modify_declaration(
         self,
         file_path: str,
@@ -468,34 +497,6 @@ class PythonHandler(LanguageHandler):
         new_source = self.insert_new_declaration(source, content)
         return validate_and_return(new_source)
 
-    def _reindent_content(self, content: str, target_indent: int) -> str:
-        """Re-indent content to a target indentation level.
-        
-        Preserves the relative indentation structure within the content
-        while adjusting the base indentation to match the target location.
-        
-        Args:
-            content: The dedented code content
-            target_indent: The number of spaces for the base indentation level
-        
-        Returns:
-            Content with adjusted indentation
-        """
-        lines = content.split('\n')
-        if not lines:
-            return content
-        
-        # Content is already dedented, so first non-empty line has 0 indent
-        # Just add target_indent to each line
-        result_lines = []
-        target_spaces = ' ' * target_indent
-        for line in lines:
-            if line.strip():
-                result_lines.append(target_spaces + line)
-            else:
-                result_lines.append('')
-        
-        return '\n'.join(result_lines)
 
     def get_class_body_insertion_point(self, content: str, class_name: str) -> Optional[int]:
         """Find insertion point for a new method inside a class.
