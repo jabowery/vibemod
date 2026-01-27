@@ -1,4 +1,3 @@
-RUST MODIFICATION CONSTRAINTS (VIBEMOD)
 
 Rust allows multiple declarations of the "same" symbol name in a file (e.g., multiple `impl Type {}` blocks; cfg-gated duplicate items; trait impls). Therefore:
 
@@ -11,31 +10,26 @@ Rust allows multiple declarations of the "same" symbol name in a file (e.g., mul
 
 3) If there may be multiple matches, add an occurrence selector `@N` (1-based) OR design the change so "replace all matches" is correct.
 
-4) When adding a new method to an existing impl block, do NOT emit a bare `fn` at module scope and do NOT wrap the method in `impl Type { }`. Either:
-   - Target `impl:TypeName.method_name` directly (vibemod will insert into the impl block), or
-   - Add a complete new `impl TypeName { ... }` block with appropriate attributes.
+4) When adding a new method to an existing impl block, do NOT emit a bare `fn` at module scope and do NOT wrap the method in `impl Type { }`. Target `impl:TypeName.method_name` directly (vibemod will insert into the impl block).
 
-5) Always provide COMPLETE Rust items (entire `impl` blocks or entire `fn`/`struct` items) for top-level declarations. No partial snippets.
+5) Always provide COMPLETE Rust items. No partial snippets.
 
 6) For test-only helpers, prefer:
    - `#[cfg(test)] impl TypeName { ... }`
    and target paths using `impl(TypeName)#[cfg(test)].method`.
 
-7) For inserting new top-level declarations, use insertion anchors:
-   - `@append_file` - append to end of file
-   - `@insert_after(ItemName)` - insert after a specific item
-   - `@insert_before(ItemName)` - insert before a specific item
+7) Default insertion behavior:
+   - New top-level declarations (fn, struct, impl, etc.) default to end of file
+   - New methods in impl blocks insert at end of the impl block
+   - Explicit anchors available when needed: `@append_file`, `@insert_after(ItemName)`, `@insert_before(ItemName)`
 
 8) For inserting statements INSIDE a function or method body (e.g., adding a `let` binding), use scoped insertion:
    - `function_name.@after:let x = 1;` - insert after the statement `let x = 1;` inside `function_name`
-   - `function_name.@before:let y = 2;` - insert before the statement `let y = 2;`
-   - `impl:TypeName.method.@after:let z = 3;` - insert inside a method in an impl block
+   - `function_name.@before:let y = 2;` - insert before the statement
+   - `impl:TypeName.method.@after:let z = 3;` - insert inside a method
    
-   Scoped insertion:
-   - Automatically handles indentation
-   - Removes any existing declaration of the same symbol name in that scope (prevents duplicates)
-   - Allows `let` statements as content (not just top-level declarations)
+   Scoped insertion automatically handles indentation and removes conflicting declarations of the same symbol in that scope.
 
-9) Target path normalization: You may include the declaration keyword in the target (e.g., `fn foo()`, `struct Bar`) and vibemod will normalize it. However, the canonical form is just the name (`foo`, `Bar`).
+9) Target path normalization: You may include the declaration keyword (e.g., `fn foo()`, `struct Bar`) but the canonical form is just the name.
 
-Output MUST be vibemod directives only. Each directive must contain full replacement code for the targeted Rust item(s), or for scoped insertion, the complete statement to insert.
+Output MUST be vibemod directives only.
