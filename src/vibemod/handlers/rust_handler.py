@@ -8,6 +8,7 @@ Implements the vibemod Rust specification:
 - Insertion anchors
 - Signature-based disambiguation
 - Rich error diagnostics
+- Scoped insertion with @after/@before anchors
 """
 
 import re
@@ -55,11 +56,6 @@ RUST_UNIQUE_ITEM_TYPES = frozenset({
     'static_item',
     'union_item',
     'macro_definition',
-    # Note: use_declaration is NOT included here because you can have multiple
-    # use statements importing different items with the same final name from
-    # different modules, e.g.:
-    #   use foo::Thing;
-    #   use bar::Thing as BarThing;
 })
 
 RUST_BODY_TYPES = frozenset({
@@ -78,9 +74,50 @@ RUST_ASSOCIATED_ITEM_TYPES = frozenset({
 })
 
 
+# =============================================================================
+# SYMBOL TYPE (for scoped insertion conflict detection)
+# =============================================================================
+
+class SymbolType:
+    """Represents the type of a symbol in Rust."""
+    LetBinding = "LetBinding"
+    ConstItem = "ConstItem"
+    StaticItem = "StaticItem"
+    Function = "Function"
+    Struct = "Struct"
+    Enum = "Enum"
+    Impl = "Impl"
+    Trait = "Trait"
+    Mod = "Mod"
+    Type = "Type"
+    Use = "Use"
+    Macro = "Macro"
+    
+    def __init__(self, name: str):
+        self.name = name
+    
+    def __eq__(self, other):
+        if isinstance(other, SymbolType):
+            return self.name == other.name
+        if isinstance(other, str):
+            return self.name == other
+        return False
+    
+    def __hash__(self):
+        return hash(self.name)
+    
+    def __repr__(self):
+        return f"SymbolType({self.name})"
+
+
+# =============================================================================
+# TARGET PATH PARSING
+# =============================================================================
+
 @dataclass
 class TargetPath:
     """Parsed representation of a vibemod target path for Rust."""
+    raw: str = ""
     module_path: List[str] = field(default_factory=list)
     item_name: Optional[str] = None
     impl_type: Optional[str] = None
@@ -90,6 +127,10 @@ class TargetPath:
     occurrence: Optional[int] = None
     insertion_anchor: Optional[str] = None
     insertion_ref: Optional[str] = None
+    # For scoped insertion
+    scope_path: Optional[str] = None
+    anchor_type: Optional[str] = None  # "after" or "before"
+    anchor_expr: Optional[str] = None
 
     @property
     def is_impl_target(self) -> bool:
@@ -102,6 +143,11 @@ class TargetPath:
     @property
     def is_insertion(self) -> bool:
         return self.insertion_anchor is not None
+    
+    @property
+    def is_scoped_insertion(self) -> bool:
+        return self.scope_path is not None and self.anchor_type is not None
+
 
 def parse_target_path(target_path: str) -> TargetPath:
     """
@@ -116,10 +162,29 @@ def parse_target_path(target_path: str) -> TargetPath:
         "impl(TLinda)@2" -> impl_type="TLinda", occurrence=2
         "foo::bar::Baz" -> module_path=["foo", "bar"], item_name="Baz"
         "TLinda@append_file" -> item_name="TLinda", insertion_anchor="append_file"
+        "my_fn.@after:let x = 1;" -> scope_path="my_fn", anchor_type="after", anchor_expr="let x = 1;"
     """
-    result = TargetPath()
+    result = TargetPath(raw=target_path)
     remaining = target_path.strip()
-    insertion_match = re.search('@(append_module|append_file|insert_before\\([^)]+\\)|insert_after\\([^)]+\\))$', remaining)
+    
+    # Check for scoped insertion: scope.@after:expr or scope.@before:expr
+    scoped_after_match = re.search(r'^(.+?)\.@after:(.+)$', remaining)
+    scoped_before_match = re.search(r'^(.+?)\.@before:(.+)$', remaining)
+    
+    if scoped_after_match:
+        result.scope_path = scoped_after_match.group(1)
+        result.anchor_type = "after"
+        result.anchor_expr = scoped_after_match.group(2)
+        return result
+    
+    if scoped_before_match:
+        result.scope_path = scoped_before_match.group(1)
+        result.anchor_type = "before"
+        result.anchor_expr = scoped_before_match.group(2)
+        return result
+    
+    # Check for insertion anchors
+    insertion_match = re.search(r'@(append_module|append_file|insert_before\([^)]+\)|insert_after\([^)]+\))$', remaining)
     if insertion_match:
         anchor = insertion_match.group(1)
         if anchor.startswith('insert_before('):
@@ -131,20 +196,26 @@ def parse_target_path(target_path: str) -> TargetPath:
         else:
             result.insertion_anchor = anchor
         remaining = remaining[:insertion_match.start()]
-    occurrence_match = re.search('@(\\d+)$', remaining)
+    
+    # Check for occurrence selector (@N)
+    occurrence_match = re.search(r'@(\d+)$', remaining)
     if occurrence_match:
         result.occurrence = int(occurrence_match.group(1))
         remaining = remaining[:occurrence_match.start()]
-    attr_match = re.search('(#\\[[^\\]]+\\])', remaining)
+    
+    # Check for attribute filter
+    attr_match = re.search(r'(#\[[^\]]+\])', remaining)
     if attr_match:
         result.attr_filter = attr_match.group(1)
         remaining = remaining[:attr_match.start()] + remaining[attr_match.end():]
-    impl_match = re.match('^(.+::)?impl\\(([^)]+)\\)(?:\\.(\\w+))?$', remaining)
+    
+    # Check for impl target
+    impl_match = re.match(r'^(.+::)?impl\(([^)]+)\)(?:\.(\w+))?$', remaining)
     if impl_match:
         if impl_match.group(1):
             result.module_path = impl_match.group(1).rstrip('::').split('::')
         impl_spec = impl_match.group(2).strip()
-        trait_match = re.match('(\\w+(?:::\\w+)*)\\s+for\\s+(\\w+(?:::\\w+)*)', impl_spec)
+        trait_match = re.match(r'(\w+(?:::\w+)*)\s+for\s+(\w+(?:::\w+)*)', impl_spec)
         if trait_match:
             result.impl_trait = trait_match.group(1)
             result.impl_type = trait_match.group(2)
@@ -153,6 +224,34 @@ def parse_target_path(target_path: str) -> TargetPath:
         if impl_match.group(3):
             result.associated_name = impl_match.group(3)
         return result
+    
+    # Check for impl: syntax
+    impl_colon_match = re.match(r'^impl:(.+)$', remaining)
+    if impl_colon_match:
+        impl_spec = impl_colon_match.group(1).strip()
+        # Check for method: impl:Type.method
+        dot_idx = impl_spec.find('.')
+        if dot_idx != -1:
+            type_part = impl_spec[:dot_idx]
+            result.associated_name = impl_spec[dot_idx+1:]
+            # Check for trait impl
+            trait_match = re.match(r'(.+?)\s+for\s+(.+)', type_part)
+            if trait_match:
+                result.impl_trait = trait_match.group(1)
+                result.impl_type = trait_match.group(2)
+            else:
+                result.impl_type = type_part
+        else:
+            # Check for trait impl without method
+            trait_match = re.match(r'(.+?)\s+for\s+(.+)', impl_spec)
+            if trait_match:
+                result.impl_trait = trait_match.group(1)
+                result.impl_type = trait_match.group(2)
+            else:
+                result.impl_type = impl_spec
+        return result
+    
+    # Check for Type.method syntax (shorthand for impl)
     if '.' in remaining and 'impl(' not in remaining:
         parts = remaining.split('.')
         type_part = parts[0]
@@ -164,13 +263,21 @@ def parse_target_path(target_path: str) -> TargetPath:
             result.impl_type = type_part
         result.associated_name = parts[1]
         return result
+    
+    # Simple path or module path
     if '::' in remaining:
         segments = remaining.split('::')
         result.module_path = segments[:-1]
         result.item_name = segments[-1]
     else:
         result.item_name = remaining
+    
     return result
+
+
+# =============================================================================
+# INDEXED ITEM (for declaration lookup)
+# =============================================================================
 
 @dataclass
 class IndexedItem:
@@ -211,6 +318,11 @@ class IndexedItem:
             return True
         return attr_filter in self.attrs
 
+
+# =============================================================================
+# RUST HANDLER
+# =============================================================================
+
 class RustHandler(LanguageHandler):
     """
     Handler for Rust source files using tree-sitter-rust.
@@ -221,17 +333,38 @@ class RustHandler(LanguageHandler):
     - Insertion anchors
     - Signature-based disambiguation
     - Rich error diagnostics
+    - Scoped insertion with @after/@before anchors
     """
+
+    def __init__(self):
+        import tree_sitter_rust_orchard as tsrust
+        from tree_sitter import Language, Parser
+        self._language = Language(tsrust.language())
+        self._parser = Parser(self._language)
+
+    def _parse(self, content: str) -> 'Node':
+        """Parse Rust source and return the root node."""
+        tree = self._parser.parse(content.encode('utf-8'))
+        return tree.root_node
+
+    def _byte_to_char(self, content: str, byte_offset: int) -> int:
+        """Convert UTF-8 byte offset to Python character offset."""
+        if byte_offset <= 0:
+            return 0
+        encoded = content.encode('utf-8')
+        if byte_offset >= len(encoded):
+            return len(content)
+        return len(encoded[:byte_offset].decode('utf-8'))
+
+    def _get_children(self, node: 'Node') -> List['Node']:
+        """Get children of a node as a list (handles tree-sitter API differences)."""
+        children = node.children
+        if hasattr(children, '__iter__') and (not isinstance(children, list)):
+            return list(children)
+        return children
 
     def _get_declaration_name(self, node: 'Node', content: str) -> Optional[str]:
-        """Extract the name from a declaration node.
-
-    Handles all Rust declaration types:
-    - function_item, struct_item, enum_item, trait_item, mod_item, 
-      type_item, const_item, static_item, union_item, macro_definition
-    - impl_item (returns the type name)
-    - use_declaration (returns the imported name)
-    """
+        """Extract the name from a declaration node."""
         if node.type == 'impl_item':
             return self._get_impl_type_name(node)
         if node.type == 'use_declaration':
@@ -240,6 +373,272 @@ class RustHandler(LanguageHandler):
         if name_node:
             return name_node.text.decode('utf-8')
         return None
+
+    def _get_impl_type_name(self, impl_node: 'Node') -> Optional[str]:
+        """Extract the type name from an impl block."""
+        type_node = impl_node.child_by_field_name('type')
+        if type_node:
+            if type_node.type == 'type_identifier':
+                return type_node.text.decode('utf-8')
+            elif type_node.type == 'generic_type':
+                ident = type_node.child_by_field_name('type')
+                if ident:
+                    return ident.text.decode('utf-8')
+        for child in impl_node.children:
+            if child.type == 'type_identifier':
+                return child.text.decode('utf-8')
+        return None
+
+    def _get_impl_trait_name(self, impl_node: 'Node') -> Optional[str]:
+        """Extract the trait name from a trait impl block."""
+        trait_node = impl_node.child_by_field_name('trait')
+        if trait_node:
+            if trait_node.type == 'type_identifier':
+                return trait_node.text.decode('utf-8')
+            elif trait_node.type == 'scoped_type_identifier':
+                return trait_node.text.decode('utf-8')
+            elif trait_node.type == 'generic_type':
+                ident = trait_node.child_by_field_name('type')
+                if ident:
+                    return ident.text.decode('utf-8')
+        return None
+
+    def _get_use_declaration_name(self, node: 'Node') -> Optional[str]:
+        """Extract the imported name from a use_declaration node."""
+        for child in self._get_children(node):
+            if child.type == 'use_as_clause':
+                alias = child.child_by_field_name('alias')
+                if alias:
+                    return alias.text.decode('utf-8')
+        arg = node.child_by_field_name('argument')
+        if arg is None:
+            for child in self._get_children(node):
+                if child.type in ('scoped_identifier', 'identifier', 'scoped_use_list', 'use_wildcard'):
+                    arg = child
+                    break
+        if arg is None:
+            return None
+        if arg.type == 'identifier':
+            return arg.text.decode('utf-8')
+        elif arg.type == 'scoped_identifier':
+            name = arg.child_by_field_name('name')
+            if name:
+                return name.text.decode('utf-8')
+            for child in reversed(self._get_children(arg)):
+                if child.type == 'identifier':
+                    return child.text.decode('utf-8')
+        return None
+
+    # =========================================================================
+    # SYMBOL TYPE DETECTION (for scoped insertion)
+    # =========================================================================
+
+    def get_symbol_type(self, content: str) -> Optional[SymbolType]:
+        """Determine the symbol type of a declaration/statement."""
+        content = content.strip()
+        root = self._parse(content)
+        
+        for child in self._get_children(root):
+            node_type = child.type
+            
+            if node_type == 'let_declaration':
+                return SymbolType(SymbolType.LetBinding)
+            elif node_type == 'const_item':
+                return SymbolType(SymbolType.ConstItem)
+            elif node_type == 'static_item':
+                return SymbolType(SymbolType.StaticItem)
+            elif node_type == 'function_item':
+                return SymbolType(SymbolType.Function)
+            elif node_type == 'struct_item':
+                return SymbolType(SymbolType.Struct)
+            elif node_type == 'enum_item':
+                return SymbolType(SymbolType.Enum)
+            elif node_type == 'impl_item':
+                return SymbolType(SymbolType.Impl)
+            elif node_type == 'trait_item':
+                return SymbolType(SymbolType.Trait)
+            elif node_type == 'mod_item':
+                return SymbolType(SymbolType.Mod)
+            elif node_type == 'type_item':
+                return SymbolType(SymbolType.Type)
+            elif node_type == 'use_declaration':
+                return SymbolType(SymbolType.Use)
+            elif node_type == 'macro_definition':
+                return SymbolType(SymbolType.Macro)
+            elif node_type == 'expression_statement':
+                for subchild in self._get_children(child):
+                    if subchild.type == 'let_declaration':
+                        return SymbolType(SymbolType.LetBinding)
+        
+        return None
+
+    def get_symbol_name(self, content: str) -> Optional[str]:
+        """Extract the symbol name from a declaration/statement."""
+        content = content.strip()
+        root = self._parse(content)
+        
+        for child in self._get_children(root):
+            node_type = child.type
+            
+            if node_type == 'let_declaration':
+                pattern = child.child_by_field_name('pattern')
+                if pattern:
+                    if pattern.type == 'identifier':
+                        return pattern.text.decode('utf-8')
+                    elif pattern.type == 'tuple_pattern':
+                        return pattern.text.decode('utf-8')
+                return None
+            elif node_type in ('function_item', 'struct_item', 'enum_item', 
+                              'trait_item', 'mod_item', 'type_item',
+                              'const_item', 'static_item'):
+                name_node = child.child_by_field_name('name')
+                if name_node:
+                    return name_node.text.decode('utf-8')
+            elif node_type == 'use_declaration':
+                return self._get_use_declaration_name(child)
+            elif node_type == 'impl_item':
+                return self._get_impl_type_name(child)
+        
+        return None
+
+    def symbols_conflict(self, type1: SymbolType, type2: SymbolType) -> bool:
+        """Return True if two symbol types conflict in the same Rust scope."""
+        if type1 is None or type2 is None:
+            return False
+        
+        # Let bindings conflict with let bindings
+        if type1.name == SymbolType.LetBinding and type2.name == SymbolType.LetBinding:
+            return True
+        
+        # Value namespace conflicts
+        value_types = {SymbolType.LetBinding, SymbolType.ConstItem, SymbolType.StaticItem}
+        if type1.name in value_types and type2.name in value_types:
+            return True
+        
+        # Type namespace conflicts
+        type_types = {SymbolType.Struct, SymbolType.Enum, SymbolType.Trait, SymbolType.Type}
+        if type1.name in type_types and type2.name in type_types:
+            return True
+        
+        # Functions conflict with functions
+        if type1.name == SymbolType.Function and type2.name == SymbolType.Function:
+            return True
+        
+        return False
+
+    # =========================================================================
+    # SCOPED INSERTION SUPPORT
+    # =========================================================================
+
+    def find_scope(self, content: str, scope_path: str) -> Optional[Tuple[int, int]]:
+        """Find the character span of a named scope (function, impl method, etc.)."""
+        span = self.find_declaration(content, scope_path)
+        if span is None:
+            return None
+        
+        decl_text = content[span[0]:span[1]]
+        root = self._parse(decl_text)
+        
+        for child in self._get_children(root):
+            if child.type in ('function_item', 'impl_item', 'mod_item', 'trait_item'):
+                body = child.child_by_field_name('body')
+                if body:
+                    body_start = span[0] + self._byte_to_char(decl_text, body.start_byte)
+                    body_end = span[0] + self._byte_to_char(decl_text, body.end_byte)
+                    return (body_start, body_end)
+        
+        return span
+
+    def find_statement_in_scope(self, content: str, scope_start: int, scope_end: int, statement: str) -> Optional[Tuple[int, int]]:
+        """Find a statement within a scope by matching its text."""
+        scope_content = content[scope_start:scope_end]
+        statement = statement.strip()
+        
+        # Try exact match
+        idx = scope_content.find(statement)
+        if idx != -1:
+            return (scope_start + idx, scope_start + idx + len(statement))
+        
+        # Try without trailing semicolon
+        if statement.endswith(';'):
+            statement_no_semi = statement[:-1].strip()
+            idx = scope_content.find(statement_no_semi)
+            if idx != -1:
+                end_idx = idx + len(statement_no_semi)
+                while end_idx < len(scope_content) and scope_content[end_idx] in ' \t':
+                    end_idx += 1
+                if end_idx < len(scope_content) and scope_content[end_idx] == ';':
+                    end_idx += 1
+                return (scope_start + idx, scope_start + end_idx)
+        
+        # Try normalized whitespace match
+        normalized_stmt = ' '.join(statement.split())
+        root = self._parse(scope_content)
+        
+        for child in self._get_children(root):
+            if child.type == 'block':
+                for stmt in self._get_children(child):
+                    stmt_start = self._byte_to_char(scope_content, stmt.start_byte)
+                    stmt_end = self._byte_to_char(scope_content, stmt.end_byte)
+                    stmt_text = scope_content[stmt_start:stmt_end]
+                    normalized_found = ' '.join(stmt_text.split())
+                    if normalized_found == normalized_stmt or normalized_found == normalized_stmt.rstrip(';'):
+                        return (scope_start + stmt_start, scope_start + stmt_end)
+        
+        return None
+
+    def find_symbol_in_scope(self, content: str, scope_start: int, scope_end: int, symbol_name: str, symbol_type: SymbolType) -> Optional[Tuple[int, int]]:
+        """Find an existing symbol declaration within a scope."""
+        scope_content = content[scope_start:scope_end]
+        root = self._parse(scope_content)
+        
+        def search_block(node):
+            for child in self._get_children(node):
+                if child.type == 'block':
+                    for stmt in self._get_children(child):
+                        result = check_statement(stmt)
+                        if result:
+                            return result
+                elif child.type in ('let_declaration', 'const_item', 'static_item',
+                                   'function_item', 'struct_item', 'enum_item'):
+                    result = check_statement(child)
+                    if result:
+                        return result
+            return None
+        
+        def check_statement(stmt):
+            stmt_start = self._byte_to_char(scope_content, stmt.start_byte)
+            stmt_end = self._byte_to_char(scope_content, stmt.end_byte)
+            stmt_text = scope_content[stmt_start:stmt_end]
+            
+            stmt_type = self.get_symbol_type(stmt_text)
+            stmt_name = self.get_symbol_name(stmt_text)
+            
+            if stmt_name == symbol_name and self.symbols_conflict(stmt_type, symbol_type):
+                return (scope_start + stmt_start, scope_start + stmt_end)
+            return None
+        
+        return search_block(root)
+
+    def get_scope_indent(self, content: str, scope_start: int, scope_end: int) -> int:
+        """Get the indentation level for statements in a scope."""
+        scope_content = content[scope_start:scope_end]
+        
+        lines = scope_content.split('\n')
+        for line in lines[1:]:  # Skip first line (opening brace)
+            stripped = line.lstrip()
+            if stripped and not stripped.startswith('//') and not stripped.startswith('}'):
+                return len(line) - len(stripped)
+        
+        # Default: find indent of scope start and add 4
+        line_start = content.rfind('\n', 0, scope_start) + 1
+        scope_line = content[line_start:scope_start]
+        base_indent = len(scope_line) - len(scope_line.lstrip())
+        return base_indent + 4
+
+    # =========================================================================
+    # TARGET PATH NORMALIZATION
+    # =========================================================================
 
     def normalize_target_path(self, target_path: str, content: str = None) -> str:
         """Normalize a target path by stripping redundant type prefixes."""
@@ -264,6 +663,137 @@ class RustHandler(LanguageHandler):
             return 'impl:' + rest
         return target
 
+    # =========================================================================
+    # VALIDATION
+    # =========================================================================
+
+    def validate_single_declaration(self, content: str, allow_statements: bool = False) -> Optional[str]:
+        """
+        Validate that content contains exactly one top-level declaration.
+        
+        Args:
+            content: The code to validate
+            allow_statements: If True, also allow let statements (for scoped insertion)
+        
+        Returns None if valid, or an error message if invalid.
+        """
+        content = content.strip()
+        if not content:
+            return 'Declare content is empty. Each declare directive must contain exactly one declaration.'
+        root = self._parse(content)
+        declarations = []
+        for child in self._get_children(root):
+            if child.type in RUST_DECL_TYPES:
+                declarations.append(child)
+            elif allow_statements and child.type == 'let_declaration':
+                declarations.append(child)
+            elif child.type == 'attribute_item':
+                continue
+            elif child.type in ('line_comment', 'block_comment'):
+                continue
+            elif child.type == 'ERROR':
+                return 'Declare content has syntax errors and cannot be parsed.'
+        if len(declarations) == 0:
+            if allow_statements:
+                return 'Declare content contains no valid Rust declaration or statement.'
+            return 'Declare content contains no valid Rust declaration. Expected: fn, struct, enum, impl, trait, mod, type, const, static, macro, or use.'
+        if len(declarations) > 1:
+            decl_names = []
+            for d in declarations:
+                name_node = d.child_by_field_name('name')
+                if name_node:
+                    decl_names.append(f"{d.type.replace('_item', '').replace('_declaration', '')} '{name_node.text.decode('utf-8')}'")
+                elif d.type == 'impl_item':
+                    impl_type = self._get_impl_type_name(d)
+                    decl_names.append(f"impl {impl_type or '?'}")
+                elif d.type == 'use_declaration':
+                    use_name = self._get_use_declaration_name(d)
+                    decl_names.append(f"use '{use_name or '?'}'")
+                elif d.type == 'let_declaration':
+                    pattern = d.child_by_field_name('pattern')
+                    if pattern:
+                        decl_names.append(f"let '{pattern.text.decode('utf-8')}'")
+                    else:
+                        decl_names.append('let')
+                else:
+                    decl_names.append(d.type.replace('_item', '').replace('_declaration', ''))
+            return f"Declare content contains {len(declarations)} declarations, but only one is allowed per directive.\nFound: {', '.join(decl_names)}\nSplit these into separate MMM declare MMM blocks."
+        return None
+
+    def _collect_errors(self, node: 'Node', content: str, errors: List = None) -> List[tuple]:
+        """Recursively collect ERROR and MISSING nodes from parse tree."""
+        if errors is None:
+            errors = []
+        if node.type == 'ERROR' or node.is_missing:
+            start_point = node.start_point
+            line_num = start_point[0] + 1
+            col = start_point[1] + 1
+            start_char = self._byte_to_char(content, node.start_byte)
+            end_char = self._byte_to_char(content, node.end_byte)
+            ctx_start = max(0, start_char - 20)
+            ctx_end = min(len(content), end_char + 20)
+            context = content[ctx_start:ctx_end].replace('\n', '\\n')
+            if ctx_start > 0:
+                context = '...' + context
+            if ctx_end < len(content):
+                context = context + '...'
+            error_text = 'Unexpected syntax' if node.type == 'ERROR' else f'Missing {node.type}'
+            errors.append((error_text, line_num, col, context))
+        for child in self._get_children(node):
+            self._collect_errors(child, content, errors)
+        return errors
+
+    def validate_syntax(self, content: str, original_content: str = None) -> Optional[str]:
+        """Validate Rust syntax using tree-sitter."""
+        root = self._parse(content)
+        errors = self._collect_errors(root, content)
+        if not errors:
+            return None
+        error_lines = ['Syntax errors detected in resulting code:']
+        for error_text, line_num, col, context in errors[:5]:
+            error_lines.append(f'  Line {line_num}, column {col}: {error_text}')
+            error_lines.append(f'    Context: {context}')
+        if len(errors) > 5:
+            error_lines.append(f'  ... and {len(errors) - 5} more errors')
+        error_lines.append('')
+        error_lines.append('The modification has been rejected to prevent invalid code.')
+        return '\n'.join(error_lines)
+
+    def validate_no_illegal_duplicates(self, content: str) -> Optional[str]:
+        """Validate that the content has no illegal duplicate declarations."""
+        items = self._build_item_index(content)
+        seen: dict[tuple, IndexedItem] = {}
+        duplicates: List[tuple[str, str, IndexedItem, IndexedItem]] = []
+        for item in items:
+            if item.parent_impl is not None:
+                continue
+            if item.kind == 'impl_item':
+                continue
+            if item.kind not in RUST_UNIQUE_ITEM_TYPES:
+                continue
+            if item.name is None:
+                continue
+            key = (tuple(item.module_path), item.kind, item.name)
+            if key in seen:
+                existing = seen[key]
+                duplicates.append((item.kind, item.name, existing, item))
+            else:
+                seen[key] = item
+        if not duplicates:
+            return None
+        lines = ['Illegal duplicate declarations detected:']
+        for kind, name, first, second in duplicates:
+            kind_name = kind.replace('_item', '').replace('_', ' ')
+            lines.append(f"  - {kind_name} '{name}' declared at bytes {first.start_byte} and {second.start_byte}")
+        lines.append('')
+        lines.append('Rust requires these items to be unique within a module scope.')
+        lines.append('The modification has been rejected to prevent invalid code.')
+        return '\n'.join(lines)
+
+    # =========================================================================
+    # DECLARATION MODIFICATION
+    # =========================================================================
+
     def modify_declaration(
         self,
         file_path: str,
@@ -275,18 +805,19 @@ class RustHandler(LanguageHandler):
     ) -> str:
         """
         Rust-specific declaration modification.
-
-        Extends base class to handle:
+        
+        Handles:
         - impl block method insertion
         - Rust-specific target path parsing (impl:Type.method)
         - Tolerant target syntax (fn foo(), struct Bar, etc.)
+        - Scoped insertion with @after/@before anchors
         """
         source_before = source
-
+        
         # Normalize target path to handle "fn foo()" -> "foo" etc.
         target_path = self.normalize_target_path(target_path, content)
         target = parse_target_path(target_path)
-
+        
         def validate_and_return(new_source: str) -> str:
             syntax_error = self.validate_syntax(new_source, original_content=source_before)
             if syntax_error:
@@ -302,13 +833,101 @@ class RustHandler(LanguageHandler):
                     )
                     raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
                 raise ValueError(f'Modification would create syntactically invalid Rust code:\n{syntax_error}')
-
+            
             dup_error = self.validate_no_illegal_duplicates(new_source)
             if dup_error:
                 raise ValueError(f'Modification would create invalid Rust code:\n{dup_error}')
-
+            
             return new_source
-
+        
+        # Handle scoped insertion (@after/@before within a scope)
+        if target.is_scoped_insertion:
+            if content is None:
+                raise ValueError('Content required for scoped insertion')
+            
+            content = textwrap.dedent(content).strip()
+            
+            # For scoped insertion, allow let statements
+            single_decl_error = self.validate_single_declaration(content, allow_statements=True)
+            if single_decl_error:
+                if debug_dump_func:
+                    debug_dir = debug_dump_func(
+                        file_path=file_path,
+                        target_path=target_path,
+                        content=content,
+                        source_before=source_before,
+                        source_after=content,
+                        error_message=single_decl_error,
+                        remove=remove
+                    )
+                    raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
+                raise ValueError(f'Invalid declare content:\n{single_decl_error}')
+            
+            # Find the scope
+            scope_span = self.find_scope(source, target.scope_path)
+            if scope_span is None:
+                raise ValueError(f"Scope '{target.scope_path}' not found in {file_path}")
+            
+            # Find the anchor statement
+            anchor_span = self.find_statement_in_scope(
+                source, scope_span[0], scope_span[1], target.anchor_expr
+            )
+            if anchor_span is None:
+                raise ValueError(f"Anchor '{target.anchor_expr}' not found in scope '{target.scope_path}'")
+            
+            # Check for conflicting existing symbol
+            new_symbol_type = self.get_symbol_type(content)
+            new_symbol_name = self.get_symbol_name(content)
+            
+            new_source = source
+            if new_symbol_name and new_symbol_type:
+                existing_span = self.find_symbol_in_scope(
+                    new_source, scope_span[0], scope_span[1],
+                    new_symbol_name, new_symbol_type
+                )
+                if existing_span:
+                    # Remove existing declaration
+                    before = new_source[:existing_span[0]].rstrip()
+                    after = new_source[existing_span[1]:].lstrip()
+                    if not before.endswith('\n'):
+                        before += '\n'
+                    new_source = before + after
+                    
+                    # Recalculate spans
+                    offset = len(source) - len(new_source)
+                    if anchor_span[0] > existing_span[0]:
+                        anchor_span = (anchor_span[0] - offset, anchor_span[1] - offset)
+                    scope_span = self.find_scope(new_source, target.scope_path)
+            
+            # Get indentation
+            indent = self.get_scope_indent(new_source, scope_span[0], scope_span[1])
+            indent_str = ' ' * indent
+            
+            # Indent the content
+            indented_lines = []
+            for line in content.split('\n'):
+                if line.strip():
+                    indented_lines.append(indent_str + line)
+                else:
+                    indented_lines.append(line)
+            indented_content = '\n'.join(indented_lines)
+            
+            # Insert before or after anchor
+            if target.anchor_type == 'after':
+                insert_pos = anchor_span[1]
+                while insert_pos < len(new_source) and new_source[insert_pos] not in '\n':
+                    insert_pos += 1
+                if insert_pos < len(new_source) and new_source[insert_pos] == '\n':
+                    insert_pos += 1
+                new_source = new_source[:insert_pos] + indented_content + '\n' + new_source[insert_pos:]
+            else:  # before
+                insert_pos = anchor_span[0]
+                while insert_pos > 0 and new_source[insert_pos - 1] != '\n':
+                    insert_pos -= 1
+                new_source = new_source[:insert_pos] + indented_content + '\n' + new_source[insert_pos:]
+            
+            return validate_and_return(new_source)
+        
         # Handle removal
         if remove:
             spans = self.find_all_declarations(source, target_path)
@@ -320,20 +939,20 @@ class RustHandler(LanguageHandler):
                 before = new_source[:start].rstrip()
                 after = new_source[end:].lstrip()
                 new_source = before + '\n\n' + after
-            new_source = re.sub('\n\n\n+', '\n\n', new_source)
+            new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
             return validate_and_return(new_source)
-
+        
         if content is None:
             raise ValueError('Content required for declare operation')
-
+        
         content = textwrap.dedent(content).strip()
-
+        
         # Unwrap method from impl block if user wrapped it
         if target.is_impl_target and target.associated_name:
             unwrapped = self.unwrap_method_from_impl(content, target.associated_name)
             if unwrapped is not None:
                 content = unwrapped
-
+        
         single_decl_error = self.validate_single_declaration(content)
         if single_decl_error:
             if debug_dump_func:
@@ -348,7 +967,7 @@ class RustHandler(LanguageHandler):
                 )
                 raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
             raise ValueError(f'Invalid declare content:\n{single_decl_error}')
-
+        
         # Handle insertion anchors
         if target.is_insertion:
             insertion_point = self.get_insertion_point(source, target_path)
@@ -358,9 +977,9 @@ class RustHandler(LanguageHandler):
             before = source[:insertion_point].rstrip()
             after = source[insertion_point:].lstrip()
             new_source = before + '\n\n' + content + '\n\n' + after
-            new_source = re.sub('\n\n\n+', '\n\n', new_source)
+            new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
             return validate_and_return(new_source)
-
+        
         # Handle impl method targets
         if target.is_impl_target and target.associated_name:
             spans = self.find_all_declarations(source, target_path)
@@ -374,13 +993,13 @@ class RustHandler(LanguageHandler):
                 for start, end in adjusted_spans:
                     new_source = new_source[:start] + content + new_source[end:]
                 return validate_and_return(new_source)
-
+            
             # No existing method - insert into impl block
             insertion_point = self.get_impl_block_insertion_point(source, target_path)
             if insertion_point is None:
                 diagnostic = self.format_candidates_diagnostic(source, target_path)
                 raise ValueError(f"Cannot insert method '{target.associated_name}': no matching impl block found or multiple impl blocks match (use @N selector).\n{diagnostic}")
-
+            
             line_start = source.rfind('\n', 0, insertion_point) + 1
             line_content = source[line_start:insertion_point]
             base_indent = len(line_content) - len(line_content.lstrip())
@@ -391,7 +1010,7 @@ class RustHandler(LanguageHandler):
             )
             new_source = source[:insertion_point] + '\n' + indented_content + '\n' + source[insertion_point:]
             return validate_and_return(new_source)
-
+        
         # Standard declaration replacement
         spans = self.find_all_declarations(source, target_path)
         if spans:
@@ -404,88 +1023,25 @@ class RustHandler(LanguageHandler):
             for start, end in adjusted_spans:
                 new_source = new_source[:start] + content + new_source[end:]
             return validate_and_return(new_source)
-
+        
         # Handle impl block without method (error case)
         if target.is_impl_target and not target.associated_name:
             diagnostic = self.format_candidates_diagnostic(source, target_path)
             raise ValueError(f"No impl block found for '{target_path}'. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
-
+        
         # Append new declaration to file
         new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
         return validate_and_return(new_source)
 
-    def unwrap_content_if_needed(self, content: str, target_path: str) -> str:
-        """Unwrap method from impl block if user wrapped it unnecessarily."""
-        target = parse_target_path(target_path)
-        if target.is_impl_target and target.associated_name:
-            unwrapped = self.unwrap_method_from_impl(content, target.associated_name)
-            if unwrapped is not None:
-                return unwrapped
-        return content
-
-    def content_starts_with_attr_or_doc(self, code: str) -> bool:
-        """Check if code starts with attributes (#[...]) or doc comments (///)."""
-        stripped = code.lstrip()
-        return stripped.startswith('#[') or stripped.startswith('///') or stripped.startswith('//!') or stripped.startswith('/**') or stripped.startswith('/*!')
-
-    def is_insertion_target(self, target_path: str) -> bool:
-        """Check if target path is an insertion anchor."""
-        target = parse_target_path(target_path)
-        return target.is_insertion
-
-    def get_decl_types(self) -> frozenset:
-        """Return Rust declaration node types."""
-        return RUST_DECL_TYPES
-
-    def _get_use_declaration_name(self, node: 'Node') -> Optional[str]:
-        """Extract the imported name from a use_declaration node.
-
-    Handles various use patterns:
-    - `use foo::Bar;` -> "Bar"
-    - `use foo::Bar as Baz;` -> "Baz" (the alias)
-    - `pub use kernel::KernelDiag;` -> "KernelDiag"
-    - `use foo::{A, B};` -> None (use_list not supported as single target)
-    - `use foo::*;` -> None (glob imports not supported as single target)
-    """
-        for child in self._get_children(node):
-            if child.type == 'use_as_clause':
-                alias = child.child_by_field_name('alias')
-                if alias:
-                    return alias.text.decode('utf-8')
-        arg = node.child_by_field_name('argument')
-        if arg is None:
-            for child in self._get_children(node):
-                if child.type in ('scoped_identifier', 'identifier', 'scoped_use_list', 'use_wildcard'):
-                    arg = child
-                    break
-        if arg is None:
-            return None
-        if arg.type == 'identifier':
-            return arg.text.decode('utf-8')
-        elif arg.type == 'scoped_identifier':
-            name = arg.child_by_field_name('name')
-            if name:
-                return name.text.decode('utf-8')
-            for child in reversed(self._get_children(arg)):
-                if child.type == 'identifier':
-                    return child.text.decode('utf-8')
-        elif arg.type == 'scoped_use_list':
-            return None
-        elif arg.type == 'use_wildcard':
-            return None
-        return None
+    # =========================================================================
+    # HELPER METHODS
+    # =========================================================================
 
     def unwrap_method_from_impl(self, content: str, expected_method: str) -> Optional[str]:
         """
-    If content is an impl block containing a single method matching expected_method,
-    extract and return just the method. Otherwise return None.
-
-    This allows users to write:
-        impl Type {
-            fn method(&self) { ... }
-        }
-    when declaring impl:Type.method, and have it do the right thing.
-    """
+        If content is an impl block containing a single method matching expected_method,
+        extract and return just the method. Otherwise return None.
+        """
         content = content.strip()
         root = self._parse(content)
         impl_node = None
@@ -526,158 +1082,52 @@ class RustHandler(LanguageHandler):
             return content[start_char:end_char].strip()
         return None
 
-    def _byte_to_char(self, content: str, byte_offset: int) -> int:
-        """Convert UTF-8 byte offset to Python character offset.
+    def unwrap_content_if_needed(self, content: str, target_path: str) -> str:
+        """Unwrap method from impl block if user wrapped it unnecessarily."""
+        target = parse_target_path(target_path)
+        if target.is_impl_target and target.associated_name:
+            unwrapped = self.unwrap_method_from_impl(content, target.associated_name)
+            if unwrapped is not None:
+                return unwrapped
+        return content
 
-    Tree-sitter returns byte offsets, but Python string indexing uses
-    character offsets. For files with multi-byte UTF-8 characters,
-    these differ. This method converts byte offsets to character offsets.
-    """
-        if byte_offset <= 0:
-            return 0
-        encoded = content.encode('utf-8')
-        if byte_offset >= len(encoded):
-            return len(content)
-        return len(encoded[:byte_offset].decode('utf-8'))
+    def content_starts_with_attr_or_doc(self, code: str) -> bool:
+        """Check if code starts with attributes (#[...]) or doc comments (///)."""
+        stripped = code.lstrip()
+        return (stripped.startswith('#[') or 
+                stripped.startswith('///') or 
+                stripped.startswith('//!') or 
+                stripped.startswith('/**') or 
+                stripped.startswith('/*!'))
 
-    def _get_children(self, node: 'Node') -> List['Node']:
-        """Get children of a node as a list (handles tree-sitter API differences)."""
-        children = node.children
-        if hasattr(children, '__iter__') and (not isinstance(children, list)):
-            return list(children)
-        return children
-
-    def validate_single_declaration(self, content: str) -> Optional[str]:
-        """
-    Validate that content contains exactly one top-level declaration.
-
-    Returns None if valid, or an error message if invalid.
-    """
-        content = content.strip()
-        if not content:
-            return 'Declare content is empty. Each declare directive must contain exactly one declaration.'
-        root = self._parse(content)
-        declarations = []
+    def adjust_span_for_attributes(self, source: str, span_start: int, span_end: int, new_content: str) -> Tuple[int, int]:
+        """Adjust span if original has attrs/docs but replacement doesn't."""
+        if self.content_starts_with_attr_or_doc(new_content):
+            return (span_start, span_end)
+        original_span_text = source[span_start:span_end]
+        if not self.content_starts_with_attr_or_doc(original_span_text):
+            return (span_start, span_end)
+        # Find where actual declaration starts in span
+        root = self._parse(original_span_text)
         for child in self._get_children(root):
             if child.type in RUST_DECL_TYPES:
-                declarations.append(child)
-            elif child.type == 'attribute_item':
-                continue
-            elif child.type in ('line_comment', 'block_comment'):
-                continue
-            elif child.type == 'ERROR':
-                return f'Declare content has syntax errors and cannot be parsed.'
-        if len(declarations) == 0:
-            return 'Declare content contains no valid Rust declaration. Expected: fn, struct, enum, impl, trait, mod, type, const, static, macro, or use.'
-        if len(declarations) > 1:
-            decl_names = []
-            for d in declarations:
-                name_node = d.child_by_field_name('name')
-                if name_node:
-                    decl_names.append(f"{d.type.replace('_item', '').replace('_declaration', '')} '{name_node.text.decode('utf-8')}'")
-                elif d.type == 'impl_item':
-                    impl_type = self._get_impl_type_name(d)
-                    decl_names.append(f"impl {impl_type or '?'}")
-                elif d.type == 'use_declaration':
-                    use_name = self._get_use_declaration_name(d)
-                    decl_names.append(f"use '{use_name or '?'}'")
-                else:
-                    decl_names.append(d.type.replace('_item', '').replace('_declaration', ''))
-            return f"Declare content contains {len(declarations)} declarations, but only one is allowed per directive.\nFound: {', '.join(decl_names)}\nSplit these into separate MMM declare MMM blocks."
-        return None
+                decl_offset = self._byte_to_char(original_span_text, child.start_byte)
+                if decl_offset > 0:
+                    return (span_start + decl_offset, span_end)
+        return (span_start, span_end)
 
-    def _collect_errors(self, node: 'Node', content: str, errors: List=None) -> List[tuple]:
-        """Recursively collect ERROR and MISSING nodes from parse tree."""
-        if errors is None:
-            errors = []
-        if node.type == 'ERROR' or node.is_missing:
-            start_point = node.start_point
-            line_num = start_point[0] + 1
-            col = start_point[1] + 1
-            start_char = self._byte_to_char(content, node.start_byte)
-            end_char = self._byte_to_char(content, node.end_byte)
-            ctx_start = max(0, start_char - 20)
-            ctx_end = min(len(content), end_char + 20)
-            context = content[ctx_start:ctx_end].replace('\n', '\\n')
-            if ctx_start > 0:
-                context = '...' + context
-            if ctx_end < len(content):
-                context = context + '...'
-            error_text = 'Unexpected syntax' if node.type == 'ERROR' else f'Missing {node.type}'
-            errors.append((error_text, line_num, col, context))
-        for child in self._get_children(node):
-            self._collect_errors(child, content, errors)
-        return errors
+    def is_insertion_target(self, target_path: str) -> bool:
+        """Check if target path is an insertion anchor."""
+        target = parse_target_path(target_path)
+        return target.is_insertion
 
-    def validate_syntax(self, content: str, original_content: str=None) -> Optional[str]:
-        """
-    Validate Rust syntax using tree-sitter.
+    def get_decl_types(self) -> frozenset:
+        """Return Rust declaration node types."""
+        return RUST_DECL_TYPES
 
-    Returns None if valid, or an error message if invalid.
-
-    The original_content parameter is accepted for API compatibility but
-    is no longer used now that we use tree-sitter-rust-orchard which
-    correctly parses modern Rust syntax.
-    """
-        root = self._parse(content)
-        errors = self._collect_errors(root, content)
-        if not errors:
-            return None
-        error_lines = ['Syntax errors detected in resulting code:']
-        for error_text, line_num, col, context in errors[:5]:
-            error_lines.append(f'  Line {line_num}, column {col}: {error_text}')
-            error_lines.append(f'    Context: {context}')
-        if len(errors) > 5:
-            error_lines.append(f'  ... and {len(errors) - 5} more errors')
-        error_lines.append('')
-        error_lines.append('The modification has been rejected to prevent invalid code.')
-        return '\n'.join(error_lines)
-
-    def validate_no_illegal_duplicates(self, content: str) -> Optional[str]:
-        """
-    Validate that the content has no illegal duplicate declarations.
-
-    Returns None if valid, or an error message describing the duplicates.
-    """
-        items = self._build_item_index(content)
-        seen: dict[tuple, IndexedItem] = {}
-        duplicates: List[tuple[str, str, IndexedItem, IndexedItem]] = []
-        for item in items:
-            if item.parent_impl is not None:
-                continue
-            if item.kind == 'impl_item':
-                continue
-            if item.kind not in RUST_UNIQUE_ITEM_TYPES:
-                continue
-            if item.name is None:
-                continue
-            key = (tuple(item.module_path), item.kind, item.name)
-            if key in seen:
-                existing = seen[key]
-                duplicates.append((item.kind, item.name, existing, item))
-            else:
-                seen[key] = item
-        if not duplicates:
-            return None
-        lines = ['Illegal duplicate declarations detected:']
-        for kind, name, first, second in duplicates:
-            kind_name = kind.replace('_item', '').replace('_', ' ')
-            lines.append(f"  - {kind_name} '{name}' declared at bytes {first.start_byte} and {second.start_byte}")
-        lines.append('')
-        lines.append('Rust requires these items to be unique within a module scope.')
-        lines.append('The modification has been rejected to prevent invalid code.')
-        return '\n'.join(lines)
-
-    def __init__(self):
-        import tree_sitter_rust_orchard as tsrust
-        from tree_sitter import Language, Parser
-        self._language = Language(tsrust.language())
-        self._parser = Parser(self._language)
-
-    def _parse(self, content: str) -> 'Node':
-        """Parse Rust source and return the root node."""
-        tree = self._parser.parse(content.encode('utf-8'))
-        return tree.root_node
+    # =========================================================================
+    # INDEXING
+    # =========================================================================
 
     def _build_item_index(self, content: str) -> List[IndexedItem]:
         """Build a complete index of all items in the file, including associated items."""
@@ -754,13 +1204,17 @@ class RustHandler(LanguageHandler):
                 doc_comment_start = None
 
     def _index_item(self, node: 'Node', module_path: List[str], attrs: List[str], start_char: int, end_char: int, content: str) -> Optional[IndexedItem]:
-        """Create an IndexedItem from a tree-sitter node.
-
-    Note: start_char and end_char are character offsets (not byte offsets).
-    The IndexedItem fields are still named start_byte/end_byte for compatibility,
-    but they now store character offsets.
-    """
-        item = IndexedItem(kind=node.type, name=None, module_path=list(module_path), start_byte=start_char, end_byte=end_char, attrs=list(attrs), attrs_fingerprint=' '.join(sorted(attrs)), node=node)
+        """Create an IndexedItem from a tree-sitter node."""
+        item = IndexedItem(
+            kind=node.type,
+            name=None,
+            module_path=list(module_path),
+            start_byte=start_char,
+            end_byte=end_char,
+            attrs=list(attrs),
+            attrs_fingerprint=' '.join(sorted(attrs)),
+            node=node
+        )
         if node.type == 'impl_item':
             item.impl_type = self._get_impl_type_name(node)
             item.impl_trait = self._get_impl_trait_name(node)
@@ -829,7 +1283,17 @@ class RustHandler(LanguageHandler):
                     else:
                         start_char = self._byte_to_char(content, child.start_byte)
                     end_char = self._byte_to_char(content, child.end_byte)
-                    assoc_item = IndexedItem(kind=child.type, name=name_node.text.decode('utf-8'), module_path=parent_item.module_path, start_byte=start_char, end_byte=end_char, attrs=list(pending_attrs), attrs_fingerprint=' '.join(sorted(pending_attrs)), parent_impl=parent_item, node=child)
+                    assoc_item = IndexedItem(
+                        kind=child.type,
+                        name=name_node.text.decode('utf-8'),
+                        module_path=parent_item.module_path,
+                        start_byte=start_char,
+                        end_byte=end_char,
+                        attrs=list(pending_attrs),
+                        attrs_fingerprint=' '.join(sorted(pending_attrs)),
+                        parent_impl=parent_item,
+                        node=child
+                    )
                     parent_item.associated_items.append(assoc_item)
                 pending_attrs = []
                 attr_start = None
@@ -838,35 +1302,6 @@ class RustHandler(LanguageHandler):
                 pending_attrs = []
                 attr_start = None
                 doc_comment_start = None
-
-    def _get_impl_type_name(self, impl_node: 'Node') -> Optional[str]:
-        """Extract the type name from an impl block."""
-        type_node = impl_node.child_by_field_name('type')
-        if type_node:
-            if type_node.type == 'type_identifier':
-                return type_node.text.decode('utf-8')
-            elif type_node.type == 'generic_type':
-                ident = type_node.child_by_field_name('type')
-                if ident:
-                    return ident.text.decode('utf-8')
-        for child in impl_node.children:
-            if child.type == 'type_identifier':
-                return child.text.decode('utf-8')
-        return None
-
-    def _get_impl_trait_name(self, impl_node: 'Node') -> Optional[str]:
-        """Extract the trait name from a trait impl block."""
-        trait_node = impl_node.child_by_field_name('trait')
-        if trait_node:
-            if trait_node.type == 'type_identifier':
-                return trait_node.text.decode('utf-8')
-            elif trait_node.type == 'scoped_type_identifier':
-                return trait_node.text.decode('utf-8')
-            elif trait_node.type == 'generic_type':
-                ident = trait_node.child_by_field_name('type')
-                if ident:
-                    return ident.text.decode('utf-8')
-        return None
 
     def _find_matches(self, items: List[IndexedItem], target: TargetPath) -> List[IndexedItem]:
         """Find all items matching the target path."""
@@ -914,13 +1349,12 @@ class RustHandler(LanguageHandler):
             return item.name == target.item_name
         return False
 
-    def find_declaration(self, content: str, target_path: str) -> Optional[Tuple[int, int]]:
-        """
-    Find declaration(s) matching the target path.
+    # =========================================================================
+    # DECLARATION FINDING
+    # =========================================================================
 
-    Returns the span of the FIRST match. For multi-match operations,
-    use find_all_declarations().
-    """
+    def find_declaration(self, content: str, target_path: str) -> Optional[Tuple[int, int]]:
+        """Find declaration(s) matching the target path."""
         target = parse_target_path(target_path)
         if target.is_insertion:
             return None
@@ -961,11 +1395,7 @@ class RustHandler(LanguageHandler):
         return None
 
     def get_insertion_point(self, content: str, target_path: str) -> Optional[int]:
-        """
-        Get the byte offset for inserting new content based on insertion anchor.
-        
-        Returns None if no valid insertion point can be determined.
-        """
+        """Get the byte offset for inserting new content based on insertion anchor."""
         target = parse_target_path(target_path)
         if not target.is_insertion:
             return None
@@ -988,16 +1418,18 @@ class RustHandler(LanguageHandler):
         return None
 
     def get_impl_block_insertion_point(self, content: str, target_path: str) -> Optional[int]:
-        """
-    Get insertion point for a new method inside an impl block.
-
-    Returns character offset just before the closing brace of the impl block.
-    """
+        """Get insertion point for a new method inside an impl block."""
         target = parse_target_path(target_path)
         if not target.is_impl_target or not target.associated_name:
             return None
         items = self._build_item_index(content)
-        impl_target = TargetPath(module_path=target.module_path, impl_type=target.impl_type, impl_trait=target.impl_trait, attr_filter=target.attr_filter, occurrence=target.occurrence)
+        impl_target = TargetPath(
+            module_path=target.module_path,
+            impl_type=target.impl_type,
+            impl_trait=target.impl_trait,
+            attr_filter=target.attr_filter,
+            occurrence=target.occurrence
+        )
         matches = self._find_matches(items, impl_target)
         if len(matches) == 0:
             return None
@@ -1015,12 +1447,8 @@ class RustHandler(LanguageHandler):
                 return self._byte_to_char(content, body.end_byte - 1)
         return None
 
-    def format_candidates_diagnostic(self, content: str, target_path: str, max_candidates: int=10) -> str:
-        """
-        Generate a diagnostic message listing candidate matches.
-        
-        Used for error reporting when no match or ambiguous match.
-        """
+    def format_candidates_diagnostic(self, content: str, target_path: str, max_candidates: int = 10) -> str:
+        """Generate a diagnostic message listing candidate matches."""
         items = self._build_item_index(content)
         lines = [f'No match found for target path: {target_path}', '', 'Candidates:']
         count = 0
@@ -1039,13 +1467,12 @@ class RustHandler(LanguageHandler):
         return '\n'.join(lines)
 
     def update_header(self, source: str, new_header: str) -> str:
-        """
-        Replace the header section of a Rust source file.
-
-        The header is everything before the first major declaration.
-        """
+        """Replace the header section of a Rust source file."""
         header_end = self.find_header_end(source)
         new_header_clean = new_header.strip() + '\n\n'
         return new_header_clean + source[header_end:]
+
+
+# Register the handler
 if TREE_SITTER_AVAILABLE:
     register_handler('.rs', RustHandler())
