@@ -368,6 +368,7 @@ class PythonHandler(LanguageHandler):
         return new_source
 
 
+
     def _reindent_content(self, content: str, target_indent: int) -> str:
         """Re-indent content to a target indentation level.
         
@@ -375,7 +376,7 @@ class PythonHandler(LanguageHandler):
         while adjusting the base indentation to match the target location.
         
         Args:
-            content: The dedented code content
+            content: The dedented code content (first line has 0 indent)
             target_indent: The number of spaces for the base indentation level
         
         Returns:
@@ -385,13 +386,27 @@ class PythonHandler(LanguageHandler):
         if not lines:
             return content
         
-        # Content is already dedented, so first non-empty line has 0 indent
-        # Just add target_indent to each line
-        result_lines = []
-        target_spaces = ' ' * target_indent
+        # Find minimum indent of non-empty lines to determine the base
+        min_indent = None
         for line in lines:
             if line.strip():
-                result_lines.append(target_spaces + line)
+                line_indent = len(line) - len(line.lstrip())
+                if min_indent is None or line_indent < min_indent:
+                    min_indent = line_indent
+        
+        if min_indent is None:
+            min_indent = 0
+        
+        # Re-indent: remove min_indent, add target_indent
+        # This preserves relative structure
+        result_lines = []
+        for line in lines:
+            if line.strip():
+                # Calculate this line's relative indent from base
+                line_indent = len(line) - len(line.lstrip())
+                relative_indent = line_indent - min_indent
+                new_indent = target_indent + relative_indent
+                result_lines.append(' ' * new_indent + line.lstrip())
             else:
                 result_lines.append('')
         
