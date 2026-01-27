@@ -1137,6 +1137,59 @@ More random text
             with pytest.raises(ValueError, match="syntax errors"):
                 execute_canonical("declare", [file_path, "func", invalid_code])
 
+    def test_replace_class_method_preserves_indentation(self):
+        """Test that replacing a class method preserves proper indentation structure."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "test.py")
+            with open(file_path, 'w') as f:
+                f.write(textwrap.dedent("""
+                    class MyClass:
+                        def existing_method(self):
+                            pass
+                """).strip())
+
+            # New method with a body that has its own internal indentation
+            new_method = textwrap.dedent("""
+                def existing_method(self):
+                    \"\"\"Docstring.\"\"\"
+                    x = 1
+                    if x:
+                        y = 2
+                    return y
+            """).strip()
+
+            execute_canonical("declare", [file_path, "MyClass.existing_method", new_method])
+
+            with open(file_path, 'r') as f:
+                result = f.read()
+
+            # Verify the file is syntactically valid
+            try:
+                compile(result, file_path, 'exec')
+            except SyntaxError as e:
+                self.fail(f"Result has syntax error: {e}\n\nResult:\n{result}")
+
+            # Check indentation levels
+            lines = result.split('\n')
+            for line in lines:
+                if 'def existing_method' in line:
+                    indent = len(line) - len(line.lstrip())
+                    self.assertEqual(indent, 4, f"Method def should have 4 spaces, got {indent}\nLine: {line!r}")
+                elif '"""Docstring."""' in line:
+                    indent = len(line) - len(line.lstrip())
+                    self.assertEqual(indent, 8, f"Docstring should have 8 spaces, got {indent}\nLine: {line!r}")
+                elif 'x = 1' in line:
+                    indent = len(line) - len(line.lstrip())
+                    self.assertEqual(indent, 8, f"Body statement should have 8 spaces, got {indent}\nLine: {line!r}")
+                elif 'if x:' in line:
+                    indent = len(line) - len(line.lstrip())
+                    self.assertEqual(indent, 8, f"If statement should have 8 spaces, got {indent}\nLine: {line!r}")
+                elif 'y = 2' in line:
+                    indent = len(line) - len(line.lstrip())
+                    self.assertEqual(indent, 12, f"Nested statement should have 12 spaces, got {indent}\nLine: {line!r}")
+                elif 'return y' in line:
+                    indent = len(line) - len(line.lstrip())
+                    self.assertEqual(indent, 8, f"Return should have 8 spaces, got {indent}\nLine: {line!r}")
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
