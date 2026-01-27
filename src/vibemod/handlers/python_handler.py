@@ -367,6 +367,7 @@ class PythonHandler(LanguageHandler):
         new_source = re.sub('\n\n\n+', '\n\n', new_source)
         return new_source
 
+
     def modify_declaration(
         self,
         file_path: str,
@@ -378,7 +379,7 @@ class PythonHandler(LanguageHandler):
     ) -> str:
         """Python-specific declaration modification."""
         source_before = source
-
+        
         def validate_and_return(new_source: str) -> str:
             syntax_error = self.validate_syntax(new_source, original_content=source_before)
             if syntax_error:
@@ -395,7 +396,7 @@ class PythonHandler(LanguageHandler):
                     raise ValueError(f'Modification would create syntactically invalid Python code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
                 raise ValueError(f'Modification would create syntactically invalid Python code:\n{syntax_error}')
             return new_source
-
+        
         if remove:
             spans = self.find_all_declarations(source, target_path)
             if not spans:
@@ -407,14 +408,15 @@ class PythonHandler(LanguageHandler):
                 after = new_source[end:].lstrip()
                 new_source = before + '\n\n' + after
             import re
-            new_source = re.sub('\n\n\n+', '\n\n', new_source)
+            new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
             return validate_and_return(new_source)
-
+        
         if content is None:
             raise ValueError('Content required for declare operation')
-
+        
+        # Normalize content: dedent to find the base structure
         content = textwrap.dedent(content).strip()
-
+        
         single_decl_error = self.validate_single_declaration(content)
         if single_decl_error:
             if debug_dump_func:
@@ -429,7 +431,7 @@ class PythonHandler(LanguageHandler):
                 )
                 raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
             raise ValueError(f'Invalid declare content:\n{single_decl_error}')
-
+        
         spans = self.find_all_declarations(source, target_path)
         if spans:
             adjusted_spans = [
@@ -439,17 +441,59 @@ class PythonHandler(LanguageHandler):
             adjusted_spans.sort(key=lambda s: s[0], reverse=True)
             new_source = source
             for start, end in adjusted_spans:
-                new_source = new_source[:start] + content + new_source[end:]
+                # Detect the indentation of the original declaration
+                line_start = new_source.rfind('\n', 0, start) + 1
+                original_indent = start - line_start
+                
+                # Re-indent the content to match
+                indented_content = self._reindent_content(content, original_indent)
+                new_source = new_source[:start] + indented_content + new_source[end:]
             return validate_and_return(new_source)
-
-        # --- CHANGED: Try nested insertion first ---
-        if '.' in target_path:
-            nested_source = self._insert_nested_declaration(source, target_path, content)
-            if nested_source is not None:
-                return validate_and_return(nested_source)
-        # -------------------------------------------
-
+        
+        # No existing declaration - check if this is a class method target
+        parts = target_path.split('.')
+        if len(parts) == 2:
+            class_name, method_name = parts
+            insertion_point = self.get_class_body_insertion_point(source, class_name)
+            if insertion_point is not None:
+                indent = self.get_class_body_indent(source, class_name)
+                indented_content = self._reindent_content(content, indent)
+                # Insert before the end of class body
+                new_source = source[:insertion_point].rstrip() + '\n\n' + indented_content + '\n' + source[insertion_point:]
+                import re
+                new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
+                return validate_and_return(new_source)
+        
+        # Fall back to inserting at header_end position
         new_source = self.insert_new_declaration(source, content)
         return validate_and_return(new_source)
 
+    def _reindent_content(self, content: str, target_indent: int) -> str:
+        """Re-indent content to a target indentation level.
+        
+        Preserves the relative indentation structure within the content
+        while adjusting the base indentation to match the target location.
+        
+        Args:
+            content: The dedented code content
+            target_indent: The number of spaces for the base indentation level
+        
+        Returns:
+            Content with adjusted indentation
+        """
+        lines = content.split('\n')
+        if not lines:
+            return content
+        
+        # Content is already dedented, so first non-empty line has 0 indent
+        # Just add target_indent to each line
+        result_lines = []
+        target_spaces = ' ' * target_indent
+        for line in lines:
+            if line.strip():
+                result_lines.append(target_spaces + line)
+            else:
+                result_lines.append('')
+        
+        return '\n'.join(result_lines)
 register_handler('.py', PythonHandler())
