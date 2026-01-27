@@ -369,6 +369,7 @@ class PythonHandler(LanguageHandler):
 
 
 
+
     def _reindent_content(self, content: str, target_indent: int) -> str:
         """Re-indent content to a target indentation level.
         
