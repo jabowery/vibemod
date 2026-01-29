@@ -157,15 +157,15 @@ def _parse_anchor_expr(result: TargetPath, anchor_part: str) -> None:
     
     Supports:
     - Literal expressions: `let x = 1;` or `assert!(foo)`
-    - Regex patterns with optional occurrence: `"pattern"` or `"pattern"@N`
+    - Regex patterns with optional occurrence: `/pattern/` or `/pattern/@N`
     
     The regex pattern uses `\s` to match any whitespace including newlines.
     """
     anchor_part = anchor_part.strip()
     
-    # Check for regex pattern: "..." or "..."@N
-    # The pattern is quoted with double quotes
-    regex_match = re.match(r'^"(.+)"(?:@(\d+))?$', anchor_part)
+    # Check for regex pattern: /.../ or /.../@N
+    # The pattern is delimited with forward slashes
+    regex_match = re.match(r'^/(.+)/(?:@(\d+))?$', anchor_part)
     if regex_match:
         result.anchor_expr = regex_match.group(1)
         result.anchor_is_regex = True
@@ -194,13 +194,13 @@ def parse_target_path(target_path: str) -> TargetPath:
         "foo::bar::Baz" -> module_path=["foo", "bar"], item_name="Baz"
         "TLinda@append_file" -> item_name="TLinda", insertion_anchor="append_file"
         "my_fn.@after:let x = 1;" -> scope_path="my_fn", anchor_type="after", anchor_expr="let x = 1;"
-        "my_fn.@after:\"regex\"@1" -> scope_path="my_fn", anchor_type="after", anchor_expr="regex", anchor_is_regex=True, anchor_occurrence=1
+        "my_fn.@after:/regex/@1" -> scope_path="my_fn", anchor_type="after", anchor_expr="regex", anchor_is_regex=True, anchor_occurrence=1
     """
     result = TargetPath(raw=target_path)
     remaining = target_path.strip()
     
     # Check for scoped insertion: scope.@after:expr or scope.@before:expr
-    # Support both literal expressions and regex patterns (quoted with optional @N)
+    # Support both literal expressions and regex patterns (/pattern/ with optional @N)
     scoped_after_match = re.search(r'^(.+?)\.@after:(.+)$', remaining)
     scoped_before_match = re.search(r'^(.+?)\.@before:(.+)$', remaining)
     
@@ -1041,7 +1041,7 @@ class RustHandler(LanguageHandler):
                 )
                 if anchor_span is None:
                     raise ValueError(
-                        f"Anchor regex \"{target.anchor_expr}\" (occurrence @{target.anchor_occurrence or 1}) "
+                        f"Anchor regex /{target.anchor_expr}/ (occurrence @{target.anchor_occurrence or 1}) "
                         f"not found in scope '{target.scope_path}' in {file_path}"
                     )
             else:
