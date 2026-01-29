@@ -29,8 +29,8 @@ Rust allows multiple declarations of the "same" symbol name in a file (e.g., mul
    - `function_name.@before:let y = 2;` - insert before the statement
    - `impl:TypeName.method.@after:let z = 3;` - insert inside a method
    
-   Also:
-   - `function_name.@after:"assert!\(\s*max_level "@2
+   Also a regex may be used to select a statement:
+   - `function_name.@after:/assert!\(\s*max_level /@2
    would insert after the second assert statement that looked like this:
 
     assert!(
