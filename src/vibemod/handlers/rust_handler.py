@@ -131,6 +131,8 @@ class TargetPath:
     scope_path: Optional[str] = None
     anchor_type: Optional[str] = None  # "after" or "before"
     anchor_expr: Optional[str] = None
+    anchor_is_regex: bool = False  # True if anchor_expr is a regex pattern (quoted)
+    anchor_occurrence: Optional[int] = None  # Which match to use (1-based)
 
     @property
     def is_impl_target(self) -> bool:
@@ -149,6 +151,35 @@ class TargetPath:
         return self.scope_path is not None and self.anchor_type is not None
 
 
+def _parse_anchor_expr(result: TargetPath, anchor_part: str) -> None:
+    r"""
+    Parse the anchor expression part of a scoped insertion target.
+    
+    Supports:
+    - Literal expressions: `let x = 1;` or `assert!(foo)`
+    - Regex patterns with optional occurrence: `"pattern"` or `"pattern"@N`
+    
+    The regex pattern uses `\s` to match any whitespace including newlines.
+    """
+    anchor_part = anchor_part.strip()
+    
+    # Check for regex pattern: "..." or "..."@N
+    # The pattern is quoted with double quotes
+    regex_match = re.match(r'^"(.+)"(?:@(\d+))?$', anchor_part)
+    if regex_match:
+        result.anchor_expr = regex_match.group(1)
+        result.anchor_is_regex = True
+        if regex_match.group(2):
+            result.anchor_occurrence = int(regex_match.group(2))
+        else:
+            result.anchor_occurrence = 1  # Default to first match
+    else:
+        # Literal expression (existing behavior)
+        result.anchor_expr = anchor_part
+        result.anchor_is_regex = False
+        result.anchor_occurrence = None
+
+
 def parse_target_path(target_path: str) -> TargetPath:
     """
     Parse a vibemod target path string into structured form.
@@ -163,24 +194,28 @@ def parse_target_path(target_path: str) -> TargetPath:
         "foo::bar::Baz" -> module_path=["foo", "bar"], item_name="Baz"
         "TLinda@append_file" -> item_name="TLinda", insertion_anchor="append_file"
         "my_fn.@after:let x = 1;" -> scope_path="my_fn", anchor_type="after", anchor_expr="let x = 1;"
+        "my_fn.@after:\"regex\"@1" -> scope_path="my_fn", anchor_type="after", anchor_expr="regex", anchor_is_regex=True, anchor_occurrence=1
     """
     result = TargetPath(raw=target_path)
     remaining = target_path.strip()
     
     # Check for scoped insertion: scope.@after:expr or scope.@before:expr
+    # Support both literal expressions and regex patterns (quoted with optional @N)
     scoped_after_match = re.search(r'^(.+?)\.@after:(.+)$', remaining)
     scoped_before_match = re.search(r'^(.+?)\.@before:(.+)$', remaining)
     
     if scoped_after_match:
         result.scope_path = scoped_after_match.group(1)
         result.anchor_type = "after"
-        result.anchor_expr = scoped_after_match.group(2)
+        anchor_part = scoped_after_match.group(2)
+        _parse_anchor_expr(result, anchor_part)
         return result
     
     if scoped_before_match:
         result.scope_path = scoped_before_match.group(1)
         result.anchor_type = "before"
-        result.anchor_expr = scoped_before_match.group(2)
+        anchor_part = scoped_before_match.group(2)
+        _parse_anchor_expr(result, anchor_part)
         return result
     
     # Check for insertion anchors
@@ -597,6 +632,71 @@ class RustHandler(LanguageHandler):
         
         return None
 
+    def find_statement_by_regex(
+        self, 
+        content: str, 
+        scope_start: int, 
+        scope_end: int, 
+        pattern: str, 
+        occurrence: int = 1
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Find a statement within a scope by regex pattern matching.
+        
+        The regex is matched against each statement in the scope. When a statement
+        contains a match, the entire statement's span is returned (not just the matched part).
+        
+        Args:
+            content: Full source content
+            scope_start: Start offset of scope in content
+            scope_end: End offset of scope in content  
+            pattern: Regex pattern to search for (\\s matches any whitespace including newlines)
+            occurrence: Which match to return (1-based, default 1)
+            
+        Returns:
+            Tuple of (start, end) offsets for the Nth matching statement, or None if not found.
+        """
+        scope_content = content[scope_start:scope_end]
+        
+        # Compile the regex with DOTALL so \s matches newlines
+        try:
+            regex = re.compile(pattern, re.DOTALL)
+        except re.error as e:
+            raise ValueError(f"Invalid regex pattern '{pattern}': {e}")
+        
+        # Parse the scope to get individual statements
+        root = self._parse(scope_content)
+        
+        matching_statements: List[Tuple[int, int]] = []
+        
+        def find_statements_in_node(node):
+            """Recursively find statements that match the regex."""
+            # Check if this is a statement-like node
+            if node.type in ('let_declaration', 'expression_statement', 'return_expression',
+                            'if_expression', 'while_expression', 'for_expression', 
+                            'loop_expression', 'match_expression', 'macro_invocation'):
+                stmt_start = self._byte_to_char(scope_content, node.start_byte)
+                stmt_end = self._byte_to_char(scope_content, node.end_byte)
+                stmt_text = scope_content[stmt_start:stmt_end]
+                
+                if regex.search(stmt_text):
+                    matching_statements.append((scope_start + stmt_start, scope_start + stmt_end))
+                return  # Don't recurse into matched statements
+            
+            # For blocks and other containers, recurse into children
+            for child in node.children:
+                find_statements_in_node(child)
+        
+        # Start the search
+        for child in self._get_children(root):
+            find_statements_in_node(child)
+        
+        # Return the Nth match (1-based)
+        if 1 <= occurrence <= len(matching_statements):
+            return matching_statements[occurrence - 1]
+        
+        return None
+
 
 
     def find_symbol_in_scope(self, content: str, scope_start: int, scope_end: int, symbol_name: str, symbol_type: SymbolType) -> Optional[Tuple[int, int]]:
@@ -681,7 +781,8 @@ class RustHandler(LanguageHandler):
         
         Args:
             content: The code to validate
-            allow_statements: If True, also allow let statements (for scoped insertion)
+            allow_statements: If True, also allow statements (for scoped insertion),
+                             including let declarations, if/while/for, function calls, etc.
         
         Returns None if valid, or an error message if invalid.
         """
@@ -693,7 +794,7 @@ class RustHandler(LanguageHandler):
         for child in self._get_children(root):
             if child.type in RUST_DECL_TYPES:
                 declarations.append(child)
-            elif allow_statements and child.type == 'let_declaration':
+            elif allow_statements and child.type in ('let_declaration', 'expression_statement'):
                 declarations.append(child)
             elif child.type == 'attribute_item':
                 continue
@@ -723,6 +824,26 @@ class RustHandler(LanguageHandler):
                         decl_names.append(f"let '{pattern.text.decode('utf-8')}'")
                     else:
                         decl_names.append('let')
+                elif d.type == 'expression_statement':
+                    # Try to identify the kind of expression
+                    for subchild in d.children:
+                        if subchild.type == 'if_expression':
+                            decl_names.append('if statement')
+                            break
+                        elif subchild.type == 'while_expression':
+                            decl_names.append('while statement')
+                            break
+                        elif subchild.type == 'for_expression':
+                            decl_names.append('for statement')
+                            break
+                        elif subchild.type == 'match_expression':
+                            decl_names.append('match statement')
+                            break
+                        elif subchild.type == 'call_expression':
+                            decl_names.append('function call')
+                            break
+                    else:
+                        decl_names.append('expression')
                 else:
                     decl_names.append(d.type.replace('_item', '').replace('_declaration', ''))
             return f"Declare content contains {len(declarations)} declarations, but only one is allowed per directive.\nFound: {', '.join(decl_names)}\nSplit these into separate MMM declare MMM blocks."
@@ -876,12 +997,24 @@ class RustHandler(LanguageHandler):
             if scope_span is None:
                 raise ValueError(f"Scope '{target.scope_path}' not found in {file_path}")
             
-            # Find the anchor statement
-            anchor_span = self.find_statement_in_scope(
-                source, scope_span[0], scope_span[1], target.anchor_expr
-            )
-            if anchor_span is None:
-                raise ValueError(f"Anchor '{target.anchor_expr}' not found in scope '{target.scope_path}' in {file_path}")
+            # Find the anchor statement (regex or literal)
+            if target.anchor_is_regex:
+                anchor_span = self.find_statement_by_regex(
+                    source, scope_span[0], scope_span[1], 
+                    target.anchor_expr, 
+                    target.anchor_occurrence or 1
+                )
+                if anchor_span is None:
+                    raise ValueError(
+                        f"Anchor regex \"{target.anchor_expr}\" (occurrence @{target.anchor_occurrence or 1}) "
+                        f"not found in scope '{target.scope_path}' in {file_path}"
+                    )
+            else:
+                anchor_span = self.find_statement_in_scope(
+                    source, scope_span[0], scope_span[1], target.anchor_expr
+                )
+                if anchor_span is None:
+                    raise ValueError(f"Anchor '{target.anchor_expr}' not found in scope '{target.scope_path}' in {file_path}")
             
             # Check for conflicting existing symbol
             new_symbol_type = self.get_symbol_type(content)

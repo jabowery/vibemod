@@ -29,6 +29,16 @@ Rust allows multiple declarations of the "same" symbol name in a file (e.g., mul
    - `function_name.@before:let y = 2;` - insert before the statement
    - `impl:TypeName.method.@after:let z = 3;` - insert inside a method
    
+   Also:
+   - `function_name.@after:"assert!(\s*max_level "@2
+   would insert after the second assert statement that looked like this:
+
+    assert!(
+        max_level >= 2,
+        "precondition: expected emergent level>=2 action; saw max_level={}",
+        max_level
+    );
+    
    Scoped insertion automatically handles indentation and removes conflicting declarations of the same symbol in that scope.
 
 9) Target path normalization: You may include the declaration keyword (e.g., `fn foo()`, `struct Bar`) but the canonical form is just the name.
