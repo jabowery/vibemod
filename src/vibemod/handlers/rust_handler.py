@@ -871,7 +871,7 @@ class RustHandler(LanguageHandler):
                 source, scope_span[0], scope_span[1], target.anchor_expr
             )
             if anchor_span is None:
-                raise ValueError(f"Anchor '{target.anchor_expr}' not found in scope '{target.scope_path}'")
+                raise ValueError(f"Anchor '{target.anchor_expr}' not found in scope '{target.scope_path}' in {file_path}")
             
             # Check for conflicting existing symbol
             new_symbol_type = self.get_symbol_type(content)
@@ -971,7 +971,7 @@ class RustHandler(LanguageHandler):
             insertion_point = self.get_insertion_point(source, target_path)
             if insertion_point is None:
                 diagnostic = self.format_candidates_diagnostic(source, target_path)
-                raise ValueError(f'Cannot determine insertion point.\n{diagnostic}')
+                raise ValueError(f'Cannot determine insertion point in {file_path}.\n{diagnostic}')
             before = source[:insertion_point].rstrip()
             after = source[insertion_point:].lstrip()
             new_source = before + '\n\n' + content + '\n\n' + after
@@ -996,7 +996,7 @@ class RustHandler(LanguageHandler):
             insertion_point = self.get_impl_block_insertion_point(source, target_path)
             if insertion_point is None:
                 diagnostic = self.format_candidates_diagnostic(source, target_path)
-                raise ValueError(f"Cannot insert method '{target.associated_name}': no matching impl block found or multiple impl blocks match (use @N selector).\n{diagnostic}")
+                raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: no matching impl block found or multiple impl blocks match (use @N selector).\n{diagnostic}")
             
             line_start = source.rfind('\n', 0, insertion_point) + 1
             line_content = source[line_start:insertion_point]
@@ -1025,7 +1025,7 @@ class RustHandler(LanguageHandler):
         # Handle impl block without method (error case)
         if target.is_impl_target and not target.associated_name:
             diagnostic = self.format_candidates_diagnostic(source, target_path)
-            raise ValueError(f"No impl block found for '{target_path}'. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
+            raise ValueError(f"No impl block found for '{target_path}' in {file_path}. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
         
         # Append new declaration to file
         new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
