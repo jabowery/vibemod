@@ -1020,6 +1020,25 @@ class RustHandler(LanguageHandler):
                 diagnostic = self.format_candidates_diagnostic(source, target_path)
                 # Provide more specific error based on what we found
                 items = self._build_item_index(source)
+                
+                # First check: did user use @0 (common mistake - selectors are 1-based)
+                if target.occurrence == 0:
+                    # Check how many impl blocks actually exist
+                    impl_target_no_occurrence = TargetPath(
+                        module_path=target.module_path,
+                        impl_type=target.impl_type,
+                        impl_trait=target.impl_trait,
+                        attr_filter=target.attr_filter,
+                        occurrence=None  # No occurrence filter
+                    )
+                    actual_matches = self._find_matches(items, impl_target_no_occurrence)
+                    if len(actual_matches) > 0:
+                        raise ValueError(
+                            f"Invalid occurrence selector @0 in {file_path}: selectors are 1-based. "
+                            f"Use @1 for the first impl block, @2 for the second, etc. "
+                            f"Found {len(actual_matches)} impl block(s) for '{target.impl_type}'.\n{diagnostic}"
+                        )
+                
                 impl_target = TargetPath(
                     module_path=target.module_path,
                     impl_type=target.impl_type,
@@ -1029,6 +1048,22 @@ class RustHandler(LanguageHandler):
                 )
                 matches = self._find_matches(items, impl_target)
                 if len(matches) == 0:
+                    # Check if occurrence is out of range
+                    if target.occurrence is not None:
+                        impl_target_no_occurrence = TargetPath(
+                            module_path=target.module_path,
+                            impl_type=target.impl_type,
+                            impl_trait=target.impl_trait,
+                            attr_filter=target.attr_filter,
+                            occurrence=None
+                        )
+                        actual_matches = self._find_matches(items, impl_target_no_occurrence)
+                        if len(actual_matches) > 0:
+                            raise ValueError(
+                                f"Cannot insert method '{target.associated_name}' in {file_path}: "
+                                f"@{target.occurrence} is out of range. Found {len(actual_matches)} impl block(s) for '{target.impl_type}' "
+                                f"(valid selectors: @1 to @{len(actual_matches)}).\n{diagnostic}"
+                            )
                     raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: no impl block found for '{target.impl_type}'.\n{diagnostic}")
                 elif len(matches) > 1:
                     raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: {len(matches)} impl blocks match '{target.impl_type}'. Use @N selector (e.g., impl:{target.impl_type}@1.{target.associated_name} for the first) to specify which one.\n{diagnostic}")

@@ -9,6 +9,7 @@ Rust allows multiple declarations of the "same" symbol name in a file (e.g., mul
    - Use `impl(TypeName)#[cfg(...)]...` when cfg-gated.
 
 3) If there may be multiple matches, add an occurrence selector `@N` (1-based) OR design the change so "replace all matches" is correct.
+  Oh... did I not mention that the N in @N is 1-based?  It is 1-based.
 
 4) When adding a new method to an existing impl block, do NOT emit a bare `fn` at module scope and do NOT wrap the method in `impl Type { }`. Target `impl:TypeName.method_name` directly (vibemod will insert into the impl block).
 
