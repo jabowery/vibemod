@@ -229,11 +229,16 @@ def parse_target_path(target_path: str) -> TargetPath:
     impl_colon_match = re.match(r'^impl:(.+)$', remaining)
     if impl_colon_match:
         impl_spec = impl_colon_match.group(1).strip()
-        # Check for method: impl:Type.method
+        # Check for method: impl:Type.method or impl:Type@N.method
         dot_idx = impl_spec.find('.')
         if dot_idx != -1:
             type_part = impl_spec[:dot_idx]
             result.associated_name = impl_spec[dot_idx+1:]
+            # Extract @N occurrence from type_part if present
+            type_occurrence_match = re.search(r'@(\d+)$', type_part)
+            if type_occurrence_match:
+                result.occurrence = int(type_occurrence_match.group(1))
+                type_part = type_part[:type_occurrence_match.start()]
             # Check for trait impl
             trait_match = re.match(r'(.+?)\s+for\s+(.+)', type_part)
             if trait_match:
@@ -242,6 +247,11 @@ def parse_target_path(target_path: str) -> TargetPath:
             else:
                 result.impl_type = type_part
         else:
+            # Extract @N occurrence from impl_spec if present (no method)
+            type_occurrence_match = re.search(r'@(\d+)$', impl_spec)
+            if type_occurrence_match:
+                result.occurrence = int(type_occurrence_match.group(1))
+                impl_spec = impl_spec[:type_occurrence_match.start()]
             # Check for trait impl without method
             trait_match = re.match(r'(.+?)\s+for\s+(.+)', impl_spec)
             if trait_match:
@@ -993,10 +1003,37 @@ class RustHandler(LanguageHandler):
                 return validate_and_return(new_source)
             
             # No existing method - insert into impl block
+            # First, check if content is a full impl block (common mistake)
+            content_symbol_type = self.get_symbol_type(content)
+            if content_symbol_type and content_symbol_type.name == SymbolType.Impl:
+                raise ValueError(
+                    f"Content appears to be a full impl block, but target path "
+                    f"'impl:{target.impl_type}.{target.associated_name}' expects a method body.\n"
+                    f"Either:\n"
+                    f"  1. Remove the 'impl {target.impl_type} {{ ... }}' wrapper and provide just the method, or\n"
+                    f"  2. Use an insertion anchor like '@after:impl:{target.impl_type}' to insert a new impl block.\n"
+                    f"File: {file_path}"
+                )
+            
             insertion_point = self.get_impl_block_insertion_point(source, target_path)
             if insertion_point is None:
                 diagnostic = self.format_candidates_diagnostic(source, target_path)
-                raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: no matching impl block found or multiple impl blocks match (use @N selector).\n{diagnostic}")
+                # Provide more specific error based on what we found
+                items = self._build_item_index(source)
+                impl_target = TargetPath(
+                    module_path=target.module_path,
+                    impl_type=target.impl_type,
+                    impl_trait=target.impl_trait,
+                    attr_filter=target.attr_filter,
+                    occurrence=target.occurrence
+                )
+                matches = self._find_matches(items, impl_target)
+                if len(matches) == 0:
+                    raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: no impl block found for '{target.impl_type}'.\n{diagnostic}")
+                elif len(matches) > 1:
+                    raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: {len(matches)} impl blocks match '{target.impl_type}'. Use @N selector (e.g., impl:{target.impl_type}@1.{target.associated_name} for the first) to specify which one.\n{diagnostic}")
+                else:
+                    raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: impl block found but insertion point could not be determined.\n{diagnostic}")
             
             line_start = source.rfind('\n', 0, insertion_point) + 1
             line_content = source[line_start:insertion_point]
