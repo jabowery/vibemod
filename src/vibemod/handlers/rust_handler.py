@@ -669,12 +669,47 @@ class RustHandler(LanguageHandler):
         
         matching_statements: List[Tuple[int, int]] = []
         
+        # Statement types that are actual statements (not containers)
+        STATEMENT_TYPES = frozenset({
+            'let_declaration', 'expression_statement', 'return_expression',
+            'if_expression', 'while_expression', 'for_expression', 
+            'loop_expression', 'match_expression', 'macro_invocation'
+        })
+        
+        # Container types we should always recurse into
+        CONTAINER_TYPES = frozenset({
+            'source_file', 'block', 'declaration_list'
+        })
+        
         def find_statements_in_node(node):
             """Recursively find statements that match the regex."""
+            # Always recurse into container types
+            if node.type in CONTAINER_TYPES:
+                for child in node.children:
+                    find_statements_in_node(child)
+                return
+            
+            # For expression_statement, check if it contains a block (in which case recurse)
+            # Otherwise treat it as a statement to match
+            if node.type == 'expression_statement':
+                # Check if this expression_statement contains a block as its main content
+                for child in node.children:
+                    if child.type == 'block':
+                        # This is a bare block `{ ... }` wrapped in expression_statement
+                        # Recurse into the block
+                        find_statements_in_node(child)
+                        return
+                # Not a block container - treat as regular statement
+                stmt_start = self._byte_to_char(scope_content, node.start_byte)
+                stmt_end = self._byte_to_char(scope_content, node.end_byte)
+                stmt_text = scope_content[stmt_start:stmt_end]
+                
+                if regex.search(stmt_text):
+                    matching_statements.append((scope_start + stmt_start, scope_start + stmt_end))
+                return
+            
             # Check if this is a statement-like node
-            if node.type in ('let_declaration', 'expression_statement', 'return_expression',
-                            'if_expression', 'while_expression', 'for_expression', 
-                            'loop_expression', 'match_expression', 'macro_invocation'):
+            if node.type in STATEMENT_TYPES:
                 stmt_start = self._byte_to_char(scope_content, node.start_byte)
                 stmt_end = self._byte_to_char(scope_content, node.end_byte)
                 stmt_text = scope_content[stmt_start:stmt_end]
@@ -683,7 +718,7 @@ class RustHandler(LanguageHandler):
                     matching_statements.append((scope_start + stmt_start, scope_start + stmt_end))
                 return  # Don't recurse into matched statements
             
-            # For blocks and other containers, recurse into children
+            # For other node types, recurse into children
             for child in node.children:
                 find_statements_in_node(child)
         
