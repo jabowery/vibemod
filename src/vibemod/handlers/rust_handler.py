@@ -115,210 +115,8 @@ class SymbolType:
 # TARGET PATH PARSING
 # =============================================================================
 
-@dataclass
-class TargetPath:
-    """Parsed representation of a vibemod target path for Rust."""
-    raw: str = ""
-    module_path: List[str] = field(default_factory=list)
-    item_name: Optional[str] = None
-    impl_type: Optional[str] = None
-    impl_trait: Optional[str] = None
-    associated_name: Optional[str] = None
-    attr_filter: Optional[str] = None
-    occurrence: Optional[int] = None
-    insertion_anchor: Optional[str] = None
-    insertion_ref: Optional[str] = None
-    # For scoped insertion
-    scope_path: Optional[str] = None
-    anchor_type: Optional[str] = None  # "after" or "before"
-    anchor_expr: Optional[str] = None
-    anchor_is_regex: bool = False  # True if anchor_expr is a regex pattern (quoted)
-    anchor_occurrence: Optional[int] = None  # Which match to use (1-based)
-
-    @property
-    def is_impl_target(self) -> bool:
-        return self.impl_type is not None
-
-    @property
-    def is_trait_impl(self) -> bool:
-        return self.impl_trait is not None
-
-    @property
-    def is_insertion(self) -> bool:
-        return self.insertion_anchor is not None
-    
-    @property
-    def is_scoped_insertion(self) -> bool:
-        return self.scope_path is not None and self.anchor_type is not None
-
-
-def _parse_anchor_expr(result: TargetPath, anchor_part: str) -> None:
-    r"""
-    Parse the anchor expression part of a scoped insertion target.
-    
-    Supports:
-    - Literal expressions: `let x = 1;` or `assert!(foo)`
-    - Regex patterns with optional occurrence: `/pattern/` or `/pattern/@N`
-    
-    The regex pattern uses `\s` to match any whitespace including newlines.
-    """
-    anchor_part = anchor_part.strip()
-    
-    # Check for regex pattern: /.../ or /.../@N
-    # The pattern is delimited with forward slashes
-    regex_match = re.match(r'^/(.+)/(?:@(\d+))?$', anchor_part)
-    if regex_match:
-        result.anchor_expr = regex_match.group(1)
-        result.anchor_is_regex = True
-        if regex_match.group(2):
-            result.anchor_occurrence = int(regex_match.group(2))
-        else:
-            result.anchor_occurrence = 1  # Default to first match
-    else:
-        # Literal expression (existing behavior)
-        result.anchor_expr = anchor_part
-        result.anchor_is_regex = False
-        result.anchor_occurrence = None
-
-
-def parse_target_path(target_path: str) -> TargetPath:
-    """
-    Parse a vibemod target path string into structured form.
-    
-    Examples:
-        "TLinda" -> item_name="TLinda"
-        "impl(TLinda)" -> impl_type="TLinda"
-        "impl(TLinda).eval" -> impl_type="TLinda", associated_name="eval"
-        "impl(Display for TLinda).fmt" -> impl_trait="Display", impl_type="TLinda", associated_name="fmt"
-        "impl(TLinda)#[cfg(test)].debug_count" -> impl_type="TLinda", attr_filter="#[cfg(test)]", associated_name="debug_count"
-        "impl(TLinda)@2" -> impl_type="TLinda", occurrence=2
-        "foo::bar::Baz" -> module_path=["foo", "bar"], item_name="Baz"
-        "TLinda@append_file" -> item_name="TLinda", insertion_anchor="append_file"
-        "my_fn.@after:let x = 1;" -> scope_path="my_fn", anchor_type="after", anchor_expr="let x = 1;"
-        "my_fn.@after:/regex/@1" -> scope_path="my_fn", anchor_type="after", anchor_expr="regex", anchor_is_regex=True, anchor_occurrence=1
-    """
-    result = TargetPath(raw=target_path)
-    remaining = target_path.strip()
-    
-    # Check for scoped insertion: scope.@after:expr or scope.@before:expr
-    # Support both literal expressions and regex patterns (/pattern/ with optional @N)
-    scoped_after_match = re.search(r'^(.+?)\.@after:(.+)$', remaining)
-    scoped_before_match = re.search(r'^(.+?)\.@before:(.+)$', remaining)
-    
-    if scoped_after_match:
-        result.scope_path = scoped_after_match.group(1)
-        result.anchor_type = "after"
-        anchor_part = scoped_after_match.group(2)
-        _parse_anchor_expr(result, anchor_part)
-        return result
-    
-    if scoped_before_match:
-        result.scope_path = scoped_before_match.group(1)
-        result.anchor_type = "before"
-        anchor_part = scoped_before_match.group(2)
-        _parse_anchor_expr(result, anchor_part)
-        return result
-    
-    # Check for insertion anchors
-    insertion_match = re.search(r'@(append_module|append_file|insert_before\([^)]+\)|insert_after\([^)]+\))$', remaining)
-    if insertion_match:
-        anchor = insertion_match.group(1)
-        if anchor.startswith('insert_before('):
-            result.insertion_anchor = 'insert_before'
-            result.insertion_ref = anchor[14:-1]
-        elif anchor.startswith('insert_after('):
-            result.insertion_anchor = 'insert_after'
-            result.insertion_ref = anchor[13:-1]
-        else:
-            result.insertion_anchor = anchor
-        remaining = remaining[:insertion_match.start()]
-    
-    # Check for occurrence selector (@N)
-    occurrence_match = re.search(r'@(\d+)$', remaining)
-    if occurrence_match:
-        result.occurrence = int(occurrence_match.group(1))
-        remaining = remaining[:occurrence_match.start()]
-    
-    # Check for attribute filter
-    attr_match = re.search(r'(#\[[^\]]+\])', remaining)
-    if attr_match:
-        result.attr_filter = attr_match.group(1)
-        remaining = remaining[:attr_match.start()] + remaining[attr_match.end():]
-    
-    # Check for impl target
-    impl_match = re.match(r'^(.+::)?impl\(([^)]+)\)(?:\.(\w+))?$', remaining)
-    if impl_match:
-        if impl_match.group(1):
-            result.module_path = impl_match.group(1).rstrip('::').split('::')
-        impl_spec = impl_match.group(2).strip()
-        trait_match = re.match(r'(\w+(?:::\w+)*)\s+for\s+(\w+(?:::\w+)*)', impl_spec)
-        if trait_match:
-            result.impl_trait = trait_match.group(1)
-            result.impl_type = trait_match.group(2)
-        else:
-            result.impl_type = impl_spec
-        if impl_match.group(3):
-            result.associated_name = impl_match.group(3)
-        return result
-    
-    # Check for impl: syntax
-    impl_colon_match = re.match(r'^impl:(.+)$', remaining)
-    if impl_colon_match:
-        impl_spec = impl_colon_match.group(1).strip()
-        # Check for method: impl:Type.method or impl:Type@N.method
-        dot_idx = impl_spec.find('.')
-        if dot_idx != -1:
-            type_part = impl_spec[:dot_idx]
-            result.associated_name = impl_spec[dot_idx+1:]
-            # Extract @N occurrence from type_part if present
-            type_occurrence_match = re.search(r'@(\d+)$', type_part)
-            if type_occurrence_match:
-                result.occurrence = int(type_occurrence_match.group(1))
-                type_part = type_part[:type_occurrence_match.start()]
-            # Check for trait impl
-            trait_match = re.match(r'(.+?)\s+for\s+(.+)', type_part)
-            if trait_match:
-                result.impl_trait = trait_match.group(1)
-                result.impl_type = trait_match.group(2)
-            else:
-                result.impl_type = type_part
-        else:
-            # Extract @N occurrence from impl_spec if present (no method)
-            type_occurrence_match = re.search(r'@(\d+)$', impl_spec)
-            if type_occurrence_match:
-                result.occurrence = int(type_occurrence_match.group(1))
-                impl_spec = impl_spec[:type_occurrence_match.start()]
-            # Check for trait impl without method
-            trait_match = re.match(r'(.+?)\s+for\s+(.+)', impl_spec)
-            if trait_match:
-                result.impl_trait = trait_match.group(1)
-                result.impl_type = trait_match.group(2)
-            else:
-                result.impl_type = impl_spec
-        return result
-    
-    # Check for Type.method syntax (shorthand for impl)
-    if '.' in remaining and 'impl(' not in remaining:
-        parts = remaining.split('.')
-        type_part = parts[0]
-        if '::' in type_part:
-            segments = type_part.split('::')
-            result.module_path = segments[:-1]
-            result.impl_type = segments[-1]
-        else:
-            result.impl_type = type_part
-        result.associated_name = parts[1]
-        return result
-    
-    # Simple path or module path
-    if '::' in remaining:
-        segments = remaining.split('::')
-        result.module_path = segments[:-1]
-        result.item_name = segments[-1]
-    else:
-        result.item_name = remaining
-    
-    return result
+# Import the grammar-driven parser
+from vibemod.target_parser import parse_target_path, TargetPath
 
 
 # =============================================================================
@@ -1089,7 +887,7 @@ class RustHandler(LanguageHandler):
                     indented_lines.append(line)
             indented_content = '\n'.join(indented_lines)
             
-            # Insert before or after anchor
+            # Insert before or after anchor, or replace
             if target.anchor_type == 'after':
                 insert_pos = anchor_span[1]
                 while insert_pos < len(new_source) and new_source[insert_pos] not in '\n':
@@ -1097,6 +895,18 @@ class RustHandler(LanguageHandler):
                 if insert_pos < len(new_source) and new_source[insert_pos] == '\n':
                     insert_pos += 1
                 new_source = new_source[:insert_pos] + indented_content + '\n' + new_source[insert_pos:]
+            elif target.anchor_type == 'replace':
+                # Replace the matched statement with the new content
+                # Find the line start for proper replacement
+                replace_start = anchor_span[0]
+                while replace_start > 0 and new_source[replace_start - 1] != '\n':
+                    replace_start -= 1
+                replace_end = anchor_span[1]
+                while replace_end < len(new_source) and new_source[replace_end] not in '\n':
+                    replace_end += 1
+                if replace_end < len(new_source) and new_source[replace_end] == '\n':
+                    replace_end += 1
+                new_source = new_source[:replace_start] + indented_content + '\n' + new_source[replace_end:]
             else:  # before
                 insert_pos = anchor_span[0]
                 while insert_pos > 0 and new_source[insert_pos - 1] != '\n':
