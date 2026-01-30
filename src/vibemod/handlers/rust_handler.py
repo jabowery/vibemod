@@ -1252,12 +1252,8 @@ class RustHandler(LanguageHandler):
                 new_source = new_source[:start] + content + new_source[end:]
             return validate_and_return(new_source)
         
-        # Handle impl block without method (error case)
-        if target.is_impl_target and not target.associated_name:
-            diagnostic = self.format_candidates_diagnostic(source, target_path)
-            raise ValueError(f"No impl block found for '{target_path}' in {file_path}. To add a new impl block, use an insertion anchor like @append_file.\n{diagnostic}")
-        
-        # Append new declaration to file
+        # Declaration not found - append to end of file
+        # This applies to both regular items (struct, fn, etc.) and impl blocks
         new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
         return validate_and_return(new_source)
 
