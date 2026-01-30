@@ -24,7 +24,10 @@ Rust allows multiple declarations of the "same" symbol name in a file (e.g., mul
    - New methods in impl blocks insert at end of the impl block
    - Explicit anchors available when needed: `@append_file`, `@insert_after(ItemName)`, `@insert_before(ItemName)`
 
-8) For inserting statements INSIDE a function or method body (e.g., adding a `let` binding), use scoped insertion:
+8) For modifying statements INSIDE a function or method body (e.g., adding a `let` binding), use a statement locator expression:
+
+   For example: 
+   - `function_name.@after:let x = 1;` - insert after the statement `let x = 1;` inside `function_name`
    - `function_name.@after:let x = 1;` - insert after the statement `let x = 1;` inside `function_name`
    - `function_name.@before:let y = 2;` - insert before the statement
    - `impl:TypeName.method.@after:let z = 3;` - insert inside a method
