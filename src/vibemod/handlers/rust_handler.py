@@ -41,6 +41,7 @@ RUST_DECL_TYPES = frozenset({
     'union_item',
     'macro_definition',
     'use_declaration',
+    'inner_attribute_item',
 })
 
 # Item types that must be unique by name within a module scope
@@ -1207,36 +1208,25 @@ class RustHandler(LanguageHandler):
                             f"Found {len(actual_matches)} impl block(s) for '{target.impl_type}'.\n{diagnostic}"
                         )
                 
-                impl_target = TargetPath(
-                    module_path=target.module_path,
-                    impl_type=target.impl_type,
-                    impl_trait=target.impl_trait,
-                    attr_filter=target.attr_filter,
-                    occurrence=target.occurrence
-                )
-                matches = self._find_matches(items, impl_target)
-                if len(matches) == 0:
-                    # Check if occurrence is out of range
-                    if target.occurrence is not None:
-                        impl_target_no_occurrence = TargetPath(
-                            module_path=target.module_path,
-                            impl_type=target.impl_type,
-                            impl_trait=target.impl_trait,
-                            attr_filter=target.attr_filter,
-                            occurrence=None
+                # Check if occurrence is out of range
+                if target.occurrence is not None:
+                    impl_target_no_occurrence = TargetPath(
+                        module_path=target.module_path,
+                        impl_type=target.impl_type,
+                        impl_trait=target.impl_trait,
+                        attr_filter=target.attr_filter,
+                        occurrence=None
+                    )
+                    actual_matches = self._find_matches(items, impl_target_no_occurrence)
+                    if len(actual_matches) > 0:
+                        raise ValueError(
+                            f"Cannot insert method '{target.associated_name}' in {file_path}: "
+                            f"@{target.occurrence} is out of range. Found {len(actual_matches)} impl block(s) for '{target.impl_type}' "
+                            f"(valid selectors: @1 to @{len(actual_matches)}).\n{diagnostic}"
                         )
-                        actual_matches = self._find_matches(items, impl_target_no_occurrence)
-                        if len(actual_matches) > 0:
-                            raise ValueError(
-                                f"Cannot insert method '{target.associated_name}' in {file_path}: "
-                                f"@{target.occurrence} is out of range. Found {len(actual_matches)} impl block(s) for '{target.impl_type}' "
-                                f"(valid selectors: @1 to @{len(actual_matches)}).\n{diagnostic}"
-                            )
-                    raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: no impl block found for '{target.impl_type}'.\n{diagnostic}")
-                elif len(matches) > 1:
-                    raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: {len(matches)} impl blocks match '{target.impl_type}'. Use @N selector (e.g., impl:{target.impl_type}@1.{target.associated_name} for the first) to specify which one.\n{diagnostic}")
-                else:
-                    raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: impl block found but insertion point could not be determined.\n{diagnostic}")
+                
+                # No impl block found at all
+                raise ValueError(f"Cannot insert method '{target.associated_name}' in {file_path}: no impl block found for '{target.impl_type}'.\n{diagnostic}")
             
             line_start = source.rfind('\n', 0, insertion_point) + 1
             line_content = source[line_start:insertion_point]
@@ -1656,7 +1646,12 @@ class RustHandler(LanguageHandler):
         return None
 
     def get_impl_block_insertion_point(self, content: str, target_path: str) -> Optional[int]:
-        """Get insertion point for a new method inside an impl block."""
+        """Get insertion point for a new method inside an impl block.
+        
+        When multiple impl blocks match and no @N selector is specified,
+        defaults to the first matching block (since this is an insertion,
+        not a replacement).
+        """
         target = parse_target_path(target_path)
         if not target.is_impl_target or not target.associated_name:
             return None
@@ -1671,8 +1666,8 @@ class RustHandler(LanguageHandler):
         matches = self._find_matches(items, impl_target)
         if len(matches) == 0:
             return None
-        if len(matches) > 1 and target.occurrence is None:
-            return None
+        # For insertion, default to first match if no occurrence specified
+        # (this is reasonable since we're adding a new method, not replacing)
         impl_item = matches[0]
         if impl_item.node:
             body = impl_item.node.child_by_field_name('body')
