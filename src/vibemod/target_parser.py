@@ -19,10 +19,17 @@ GRAMMAR = Grammar(r"""
     
     module_path     = (identifier "::")+
     
-    main_target     = scoped_target / impl_method / impl_target / item_target
+    main_target     = scoped_target / type_namespace / impl_method / impl_target / item_target
     
     scoped_target   = scope_base "." locator_expr
-    scope_base      = impl_method / impl_target / item_target
+    scope_base      = type_namespace / impl_method / impl_target / item_target
+    
+    # Type namespace: TypeName.struct, TypeName.impl, TypeName.Trait, TypeName.impl.method, TypeName.Trait.method
+    type_namespace  = type_ns_method / type_ns_target
+    type_ns_target  = identifier "." type_ns_member
+    type_ns_member  = "struct" / "impl" / identifier
+    type_ns_method  = identifier "." type_ns_impl_ref "." method_name
+    type_ns_impl_ref = "impl" / identifier
     
     impl_method     = impl_base "." method_name method_mods?
     impl_base       = impl_spec impl_mods?
@@ -86,6 +93,9 @@ class TargetPath:
     anchor_expr: Optional[str] = None
     anchor_is_regex: bool = False
     anchor_occurrence: Optional[int] = None
+    # Type namespace targeting
+    type_namespace: Optional[str] = None  # The type name when using namespace syntax
+    ns_member: Optional[str] = None  # "struct", "impl", or trait name
 
     @property
     def is_impl_target(self) -> bool:
@@ -102,6 +112,15 @@ class TargetPath:
     @property
     def is_scoped_insertion(self) -> bool:
         return self.scope_path is not None and self.anchor_type is not None
+    
+    @property
+    def is_type_namespace(self) -> bool:
+        return self.type_namespace is not None
+    
+    @property
+    def is_full_type_namespace(self) -> bool:
+        """True if targeting the full type namespace (no .struct/.impl/.Trait)"""
+        return self.type_namespace is not None and self.ns_member is None
 
 
 # =============================================================================
@@ -142,25 +161,32 @@ def _extract_from_tree(tree) -> TargetPath:
         # Extract the base (before locator)
         scope_base = _find_node(scoped, 'scope_base')
         if scope_base:
-            _extract_base_target(scope_base, result)
+            _extract_scope_base(scope_base, result)
             result.scope_path = _build_scope_path(result)
         
         # Extract locator
         locator = _find_node(scoped, 'locator_expr')
         if locator:
             _extract_locator(locator, result)
-    else:
-        # Non-scoped: impl_method, impl_target, or item_target
-        impl_method = _find_node(tree, 'impl_method')
-        impl_target = _find_node(tree, 'impl_target')
-        item_target = _find_node(tree, 'item_target')
-        
-        if impl_method:
-            _extract_impl_method(impl_method, result)
-        elif impl_target:
-            _extract_impl_target(impl_target, result)
-        elif item_target:
-            _extract_item_target(item_target, result)
+        return result
+    
+    # Check for type namespace
+    type_ns = _find_node(tree, 'type_namespace')
+    if type_ns:
+        _extract_type_namespace(type_ns, result)
+        return result
+    
+    # Non-scoped: impl_method, impl_target, or item_target
+    impl_method = _find_node(tree, 'impl_method')
+    impl_target = _find_node(tree, 'impl_target')
+    item_target = _find_node(tree, 'item_target')
+    
+    if impl_method:
+        _extract_impl_method(impl_method, result)
+    elif impl_target:
+        _extract_impl_target(impl_target, result)
+    elif item_target:
+        _extract_item_target(item_target, result)
     
     # Insertion anchor
     anchor = _find_node(tree, 'insertion_anchor')
@@ -169,18 +195,73 @@ def _extract_from_tree(tree) -> TargetPath:
     
     return result
 
-def _extract_base_target(node, result):
+def _extract_scope_base(node, result):
     """Extract target info from scope_base node."""
+    type_ns = _find_node(node, 'type_namespace')
     impl_method = _find_node(node, 'impl_method')
     impl_target = _find_node(node, 'impl_target')
     item_target = _find_node(node, 'item_target')
     
-    if impl_method:
+    if type_ns:
+        _extract_type_namespace(type_ns, result)
+    elif impl_method:
         _extract_impl_method(impl_method, result)
     elif impl_target:
         _extract_impl_target(impl_target, result)
     elif item_target:
         _extract_item_target(item_target, result)
+
+def _extract_type_namespace(node, result):
+    """Extract from type_namespace: TypeName.member or TypeName.impl_ref.method"""
+    # Check for type_ns_method first (has 3 parts: Type.impl_ref.method)
+    type_ns_method = _find_node(node, 'type_ns_method')
+    if type_ns_method:
+        # Structure: identifier "." type_ns_impl_ref "." method_name
+        # method_name is the last identifier (direct child, after the second dot)
+        impl_ref = _find_node(type_ns_method, 'type_ns_impl_ref')
+        
+        # Get direct child identifiers of type_ns_method
+        direct_identifiers = [child for child in type_ns_method if child.expr_name == 'identifier']
+        
+        if direct_identifiers:
+            # First direct identifier is the type name
+            result.type_namespace = direct_identifiers[0].text
+            # Last direct identifier is the method name
+            if len(direct_identifiers) >= 2:
+                result.associated_name = direct_identifiers[-1].text
+        
+        if impl_ref:
+            impl_ref_text = impl_ref.text
+            if impl_ref_text == 'impl':
+                result.ns_member = 'impl'
+                result.impl_type = result.type_namespace
+            else:
+                # It's a trait name
+                result.ns_member = impl_ref_text
+                result.impl_type = result.type_namespace
+                result.impl_trait = impl_ref_text
+        return
+    
+    # Check for type_ns_target (has 2 parts: Type.member)
+    type_ns_target = _find_node(node, 'type_ns_target')
+    if type_ns_target:
+        identifiers = _find_all_nodes(type_ns_target, 'identifier')
+        if identifiers:
+            result.type_namespace = identifiers[0].text
+        
+        member_node = _find_node(type_ns_target, 'type_ns_member')
+        if member_node:
+            member_text = member_node.text
+            if member_text == 'struct':
+                result.ns_member = 'struct'
+            elif member_text == 'impl':
+                result.ns_member = 'impl'
+                result.impl_type = result.type_namespace
+            else:
+                # It's a trait name (matched via identifier in type_ns_member)
+                result.ns_member = member_text
+                result.impl_type = result.type_namespace
+                result.impl_trait = member_text
 
 def _extract_impl_method(node, result):
     """Extract from impl_method: impl_base "." method_name method_mods?"""
@@ -189,11 +270,8 @@ def _extract_impl_method(node, result):
         _extract_impl_base(impl_base, result)
     
     # Method name is the identifier AFTER impl_base in impl_method
-    # Structure: impl_base "." identifier method_mods?
-    # We need to find the identifier that's a direct child of impl_method (not inside impl_base)
     for child in node:
         if child.expr_name == 'identifier':
-            # This is the method name (the one after the dot)
             result.associated_name = child.text
             break
 
@@ -260,7 +338,6 @@ def _extract_item_target(node, result):
 
 def _extract_locator(node, result):
     """Extract from locator_expr: "@" (insert_op / replace_op)"""
-    insert_op = _find_node(node, 'insert_op')
     insert_side = _find_node(node, 'insert_side')
     
     if insert_side:
@@ -316,7 +393,14 @@ def _build_scope_path(result):
     if result.module_path:
         parts.append('::'.join(result.module_path))
     
-    if result.impl_type:
+    if result.type_namespace:
+        ns_str = result.type_namespace
+        if result.ns_member:
+            ns_str += f".{result.ns_member}"
+        if result.associated_name:
+            ns_str += f".{result.associated_name}"
+        parts.append(ns_str)
+    elif result.impl_type:
         if result.impl_trait:
             impl_str = f"impl:{result.impl_trait} for {result.impl_type}"
         else:
@@ -346,8 +430,11 @@ def parse_target_path(target_path: str) -> TargetPath:
     Examples:
         "MyStruct" -> item_name="MyStruct"
         "impl:MyStruct.new" -> impl_type="MyStruct", associated_name="new"
+        "MyStruct.struct" -> type_namespace="MyStruct", ns_member="struct"
+        "MyStruct.impl" -> type_namespace="MyStruct", ns_member="impl"
+        "MyStruct.Default" -> type_namespace="MyStruct", ns_member="Default" (trait impl)
+        "MyStruct.impl.new" -> type_namespace="MyStruct", ns_member="impl", associated_name="new"
         "my_fn.@after:/pattern/@1" -> scope_path="my_fn", anchor_type="after", ...
-        "my_fn.@/pattern/@2" -> scope_path="my_fn", anchor_type="replace", ...
     
     Raises:
         parsimonious.exceptions.ParseError: If the target path is invalid
@@ -362,6 +449,7 @@ def parse_target_path(target_path: str) -> TargetPath:
 
 if __name__ == '__main__':
     test_cases = [
+        # Basic targets
         "MyStruct",
         "foo::bar::MyStruct",
         "impl:MyStruct",
@@ -370,10 +458,18 @@ if __name__ == '__main__':
         "impl:Display for MyStruct.fmt",
         "impl:MyStruct@2.process",
         "impl:MyStruct#[cfg(test)].debug",
+        # Type namespace targets
+        "CodecConfig.struct",
+        "CodecConfig.impl",
+        "CodecConfig.Default",
+        "CodecConfig.impl.new",
+        "CodecConfig.Default.default",
+        # Scoped targets
         "my_fn.@after:let x = 1;",
         "my_fn.@before:/assert!\\(/@1",
         r"my_fn.@/return result/@2",
         "impl:Kernel.apply.@after:/let spin =/@1",
+        # Insertion anchors
         "MyStruct@append_file",
         "my_fn@insert_after(other_fn)",
     ]
@@ -384,6 +480,10 @@ if __name__ == '__main__':
             print(f"✓ {tc}")
             if result.item_name:
                 print(f"    item_name={result.item_name}")
+            if result.type_namespace:
+                print(f"    type_namespace={result.type_namespace}")
+            if result.ns_member:
+                print(f"    ns_member={result.ns_member}")
             if result.impl_type:
                 print(f"    impl_type={result.impl_type}")
             if result.impl_trait:

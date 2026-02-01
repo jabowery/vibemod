@@ -611,7 +611,10 @@ class RustHandler(LanguageHandler):
 
     def validate_single_declaration(self, content: str, allow_statements: bool = False) -> Optional[str]:
         """
-        Validate that content contains exactly one top-level declaration.
+        Validate that content contains exactly one top-level declaration (or a valid declaration group).
+        
+        A "declaration group" is a struct/enum plus its inherent impl block(s), which are
+        treated as a single conceptual unit. Trait impls are NOT included in this grouping.
         
         Args:
             content: The code to validate
@@ -636,52 +639,251 @@ class RustHandler(LanguageHandler):
                 continue
             elif child.type == 'ERROR':
                 return 'Declare content has syntax errors and cannot be parsed.'
+        
         if len(declarations) == 0:
             if allow_statements:
                 return 'Declare content contains no valid Rust declaration or statement.'
             return 'Declare content contains no valid Rust declaration. Expected: fn, struct, enum, impl, trait, mod, type, const, static, macro, or use.'
-        if len(declarations) > 1:
-            decl_names = []
-            for d in declarations:
+        
+        if len(declarations) == 1:
+            return None
+        
+        # Multiple declarations: check if it's a valid struct/enum + inherent impl group
+        if self._is_valid_type_with_impl_group(declarations):
+            return None
+        
+        # Not a valid group - produce error message
+        decl_names = []
+        for d in declarations:
+            name_node = d.child_by_field_name('name')
+            if name_node:
+                decl_names.append(f"{d.type.replace('_item', '').replace('_declaration', '')} '{name_node.text.decode('utf-8')}'")
+            elif d.type == 'impl_item':
+                impl_type = self._get_impl_type_name(d)
+                impl_trait = self._get_impl_trait_name(d)
+                if impl_trait:
+                    decl_names.append(f"impl {impl_trait} for {impl_type or '?'}")
+                else:
+                    decl_names.append(f"impl {impl_type or '?'}")
+            elif d.type == 'use_declaration':
+                use_name = self._get_use_declaration_name(d)
+                decl_names.append(f"use '{use_name or '?'}'")
+            elif d.type == 'let_declaration':
+                pattern = d.child_by_field_name('pattern')
+                if pattern:
+                    decl_names.append(f"let '{pattern.text.decode('utf-8')}'")
+                else:
+                    decl_names.append('let')
+            elif d.type == 'expression_statement':
+                # Try to identify the kind of expression
+                for subchild in d.children:
+                    if subchild.type == 'if_expression':
+                        decl_names.append('if statement')
+                        break
+                    elif subchild.type == 'while_expression':
+                        decl_names.append('while statement')
+                        break
+                    elif subchild.type == 'for_expression':
+                        decl_names.append('for statement')
+                        break
+                    elif subchild.type == 'match_expression':
+                        decl_names.append('match statement')
+                        break
+                    elif subchild.type == 'call_expression':
+                        decl_names.append('function call')
+                        break
+                else:
+                    decl_names.append('expression')
+            else:
+                decl_names.append(d.type.replace('_item', '').replace('_declaration', ''))
+        return f"Declare content contains {len(declarations)} declarations, but only one is allowed per directive.\nFound: {', '.join(decl_names)}\nSplit these into separate MMM declare MMM blocks."
+
+    def _is_valid_type_with_impl_group(self, declarations: List['Node']) -> bool:
+        """
+        Check if declarations form a valid type + impl group.
+        
+        Valid groups:
+        - One struct/enum + any number of impl blocks for that same type
+        - This includes both inherent impls (impl Type) and trait impls (impl Trait for Type)
+        
+        Returns True if valid group, False otherwise.
+        """
+        # Find the struct or enum
+        type_decl = None
+        type_name = None
+        for d in declarations:
+            if d.type in ('struct_item', 'enum_item'):
+                if type_decl is not None:
+                    # Multiple structs/enums - not valid
+                    return False
+                type_decl = d
                 name_node = d.child_by_field_name('name')
                 if name_node:
-                    decl_names.append(f"{d.type.replace('_item', '').replace('_declaration', '')} '{name_node.text.decode('utf-8')}'")
-                elif d.type == 'impl_item':
-                    impl_type = self._get_impl_type_name(d)
-                    decl_names.append(f"impl {impl_type or '?'}")
-                elif d.type == 'use_declaration':
-                    use_name = self._get_use_declaration_name(d)
-                    decl_names.append(f"use '{use_name or '?'}'")
-                elif d.type == 'let_declaration':
-                    pattern = d.child_by_field_name('pattern')
-                    if pattern:
-                        decl_names.append(f"let '{pattern.text.decode('utf-8')}'")
-                    else:
-                        decl_names.append('let')
-                elif d.type == 'expression_statement':
-                    # Try to identify the kind of expression
-                    for subchild in d.children:
-                        if subchild.type == 'if_expression':
-                            decl_names.append('if statement')
-                            break
-                        elif subchild.type == 'while_expression':
-                            decl_names.append('while statement')
-                            break
-                        elif subchild.type == 'for_expression':
-                            decl_names.append('for statement')
-                            break
-                        elif subchild.type == 'match_expression':
-                            decl_names.append('match statement')
-                            break
-                        elif subchild.type == 'call_expression':
-                            decl_names.append('function call')
-                            break
-                    else:
-                        decl_names.append('expression')
+                    type_name = name_node.text.decode('utf-8')
+        
+        if type_decl is None or type_name is None:
+            # No struct/enum found
+            return False
+        
+        # Check all other declarations are impls for this type
+        for d in declarations:
+            if d is type_decl:
+                continue
+            if d.type != 'impl_item':
+                # Non-impl declaration mixed in
+                return False
+            
+            # Check it's for the same type
+            impl_type = self._get_impl_type_name(d)
+            if impl_type != type_name:
+                # Impl for different type
+                return False
+        
+        return True
+
+    def _parse_type_impl_group(self, content: str) -> Optional[dict]:
+        """
+        Parse content to see if it's a type + impl group.
+        
+        Returns dict with:
+            - type_name: str
+            - type_node: Node (struct or enum)
+            - impl_nodes: List[Node] (all impl blocks for this type)
+            - trait_impls: dict[str, Node] (trait name -> impl node)
+            - inherent_impl: Optional[Node] (the inherent impl, if any)
+        Or None if not a valid group.
+        """
+        content = content.strip()
+        root = self._parse(content)
+        
+        type_node = None
+        type_name = None
+        impl_nodes = []
+        trait_impls = {}
+        inherent_impl = None
+        
+        for child in self._get_children(root):
+            if child.type in ('struct_item', 'enum_item'):
+                if type_node is not None:
+                    return None  # Multiple type definitions
+                type_node = child
+                name_node = child.child_by_field_name('name')
+                if name_node:
+                    type_name = name_node.text.decode('utf-8')
+            elif child.type == 'impl_item':
+                impl_nodes.append(child)
+                trait_name = self._get_impl_trait_name(child)
+                if trait_name:
+                    trait_impls[trait_name] = child
                 else:
-                    decl_names.append(d.type.replace('_item', '').replace('_declaration', ''))
-            return f"Declare content contains {len(declarations)} declarations, but only one is allowed per directive.\nFound: {', '.join(decl_names)}\nSplit these into separate MMM declare MMM blocks."
-        return None
+                    if inherent_impl is not None:
+                        # Multiple inherent impls - merge them conceptually
+                        pass  # We'll handle this in replacement
+                    inherent_impl = child
+            elif child.type in ('attribute_item', 'line_comment', 'block_comment'):
+                continue
+            elif child.type in RUST_DECL_TYPES:
+                return None  # Other declarations not allowed
+        
+        if type_node is None or type_name is None:
+            return None
+        
+        # Verify all impls are for the same type
+        for impl_node in impl_nodes:
+            impl_type = self._get_impl_type_name(impl_node)
+            if impl_type != type_name:
+                return None
+        
+        if not impl_nodes:
+            return None  # Just a struct, not a group
+        
+        return {
+            'type_name': type_name,
+            'type_node': type_node,
+            'impl_nodes': impl_nodes,
+            'trait_impls': trait_impls,
+            'inherent_impl': inherent_impl,
+        }
+
+    def _replace_type_impl_group(
+        self, 
+        source: str, 
+        type_name: str, 
+        content: str, 
+        group_info: dict,
+        file_path: str,
+        validate_and_return
+    ) -> str:
+        """
+        Replace a type and its impl blocks in source.
+        
+        This handles the case where content is struct + impl(s) and we need to:
+        1. Replace existing struct (or append if new)
+        2. Replace/merge existing inherent impl blocks into one
+        3. Replace any trait impls that are in the content
+        """
+        new_source = source
+        
+        # Find existing struct/enum
+        struct_span = self.find_declaration(source, type_name)
+        
+        # Find all existing impl blocks for this type
+        existing_impls = []  # list of (trait_name_or_none, start_byte, end_byte)
+        items = self._build_item_index(source)
+        for item in items:
+            if item.kind == 'impl_item' and item.impl_type == type_name:
+                existing_impls.append((item.impl_trait, item.start_byte, item.end_byte))
+        
+        # Determine which existing impls to remove:
+        # - All inherent impls (we're replacing with new content)
+        # - Any trait impls that are in the new content
+        new_trait_impls = set(group_info.get('trait_impls', {}).keys())
+        has_new_inherent = group_info.get('inherent_impl') is not None
+        
+        spans_to_remove = []
+        for trait_name, start, end in existing_impls:
+            if trait_name is None and has_new_inherent:
+                # Existing inherent impl, and we have a new one
+                spans_to_remove.append((start, end, 'inherent'))
+            elif trait_name is not None and trait_name in new_trait_impls:
+                # Existing trait impl that we're replacing
+                spans_to_remove.append((start, end, f'trait:{trait_name}'))
+        
+        # Build all spans to modify
+        all_spans = []
+        if struct_span:
+            adj_start, adj_end = self.adjust_span_for_attributes(source, struct_span[0], struct_span[1], content)
+            all_spans.append(('struct', adj_start, adj_end))
+        
+        for start, end, impl_type in spans_to_remove:
+            start_char = self._byte_to_char(source, start)
+            end_char = self._byte_to_char(source, end)
+            adj_start, adj_end = self.adjust_span_for_attributes(source, start_char, end_char, content)
+            all_spans.append((impl_type, adj_start, adj_end))
+        
+        # Sort in reverse order
+        all_spans.sort(key=lambda x: x[1], reverse=True)
+        
+        if not all_spans:
+            # Nothing exists - just append
+            new_source = source.rstrip() + '\n\n' + content + '\n'
+            return validate_and_return(new_source)
+        
+        # Remove all existing spans, insert content at position of first (struct if exists, else first impl)
+        insertion_done = False
+        for span_type, start, end in all_spans:
+            if not insertion_done and (span_type == 'struct' or struct_span is None):
+                # Replace this span with the full content
+                new_source = new_source[:start] + content + new_source[end:]
+                insertion_done = True
+            else:
+                # Just remove this span
+                before = new_source[:start].rstrip()
+                after = new_source[end:].lstrip()
+                new_source = before + '\n\n' + after
+        
+        new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
+        return validate_and_return(new_source)
 
     def _collect_errors(self, node: 'Node', content: str, errors: List = None) -> List[tuple]:
         """Recursively collect ERROR and MISSING nodes from parse tree."""
@@ -1061,6 +1263,14 @@ class RustHandler(LanguageHandler):
             for start, end in adjusted_spans:
                 new_source = new_source[:start] + content + new_source[end:]
             return validate_and_return(new_source)
+        
+        # Check if content is a type + impl group (struct/enum + inherent impl)
+        # If so, handle specially: replace struct, merge/replace inherent impls
+        group_info = self._parse_type_impl_group(content)
+        if group_info and target.item_name:
+            return self._replace_type_impl_group(
+                source, target.item_name, content, group_info, file_path, validate_and_return
+            )
         
         # Declaration not found - append to end of file
         # This applies to both regular items (struct, fn, etc.) and impl blocks
