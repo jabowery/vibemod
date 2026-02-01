@@ -24,25 +24,68 @@ Rust allows multiple declarations of the "same" symbol name in a file (e.g., mul
    - New methods in impl blocks insert at end of the impl block
    - Explicit anchors available when needed: `@append_file`, `@insert_after(ItemName)`, `@insert_before(ItemName)`
 
-8) For modifying statements INSIDE a function or method body (e.g., adding a `let` binding), use a statement locator expression:
-
-   For example: 
-   - `function_name.@after:let x = 1;` - insert after the statement `let x = 1;` inside `function_name`
-   - `function_name.@after:let x = 1;` - insert after the statement `let x = 1;` inside `function_name`
-   - `function_name.@before:let y = 2;` - insert before the statement
-   - `impl:TypeName.method.@after:let z = 3;` - insert inside a method
-   
-   Also a regex may be used to select a statement:
-   - `function_name.@after:/assert!\(\s*max_level /@2
-   would insert after the second assert statement that looked like this:
-
-    assert!(
-        max_level >= 2,
-        "precondition: expected emergent level>=2 action; saw max_level={}",
-        max_level
-    );
+8) Targets may specify locations and qualifying with "before" or "after" indicates insertion of the declartaion rather than replacement of the associated item.  Here's the entire grammar for target designation:
+GRAMMAR = Grammar(r"""
+    target          = type_trait_method / type_trait / module_target
+    module_target   = module_path? main_target insertion_anchor?
     
-   Scoped insertion automatically handles indentation and removes conflicting declarations of the same symbol in that scope.
+    module_path     = (identifier "::")+
+    
+    main_target     = scoped_target / type_ns_struct / type_ns_impl_method / type_ns_impl / impl_method / impl_target / item_method / item_target
+    
+    scoped_target   = scope_base "." locator_expr
+    scope_base      = type_ns_struct / type_ns_impl_method / type_ns_impl / impl_method / impl_target / item_method / item_target
+    
+    # Type namespace explicit targets
+    type_ns_struct  = identifier ".struct"
+    type_ns_impl    = identifier ".impl"
+    type_ns_impl_method = identifier ".impl." method_name
+    
+    # Type::Trait syntax for trait impls (at top level to avoid module_path conflict)
+    type_trait      = identifier "::" identifier !("." / "::")
+    type_trait_method = identifier "::" identifier "." method_name
+    
+    # Legacy Type.method -> impl:Type.method
+    item_method     = identifier "." method_name method_mods?
+    
+    impl_method     = impl_base "." method_name method_mods?
+    impl_base       = impl_spec impl_mods?
+    impl_mods       = attr_filter? occurrence?
+    method_mods     = attr_filter? occurrence?
+    
+    impl_target     = impl_spec attr_filter? occurrence?
+    impl_spec       = impl_colon / impl_paren
+    impl_colon      = "impl:" type_spec
+    impl_paren      = "impl(" type_spec ")"
+    type_spec       = trait_impl / type_name
+    trait_impl      = type_name " for " type_name
+    type_name       = identifier
+    method_name     = identifier
+    
+    item_target     = identifier attr_filter? occurrence?
+    
+    locator_expr    = "@" (insert_op / replace_op)
+    insert_op       = insert_side (regex / statement)
+    insert_side     = ("before" / "after") ":"
+    replace_op      = regex
+    
+    regex           = "/" regex_body "/" occurrence?
+    regex_body      = ~r"[^/]+"
+    statement       = ~r".+"
+    
+    attr_filter     = "#[" attr_content "]"
+    attr_content    = ~r"[^\]]+"
+    
+    occurrence      = "@" pos_int
+    pos_int         = ~r"[0-9]+"
+    
+    insertion_anchor = "@" anchor_kind
+    anchor_kind     = "append_file" / "append_module" / insert_ref
+    insert_ref      = ("insert_before" / "insert_after") "(" identifier ")"
+    
+    identifier      = ~r"[a-zA-Z_][a-zA-Z0-9_]*"
+""")
+
 
 9) Target path normalization: You may include the declaration keyword (e.g., `fn foo()`, `struct Bar`) but the canonical form is just the name.
 

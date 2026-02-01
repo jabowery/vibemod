@@ -698,6 +698,105 @@ class RustHandler(LanguageHandler):
                 decl_names.append(d.type.replace('_item', '').replace('_declaration', ''))
         return f"Declare content contains {len(declarations)} declarations, but only one is allowed per directive.\nFound: {', '.join(decl_names)}\nSplit these into separate MMM declare MMM blocks."
 
+    def extract_leading_use_statements(self, content: str) -> tuple:
+        """
+        Extract leading use statements from content.
+        
+        If content starts with use statements followed by other declarations,
+        separate them so the use statements can be added to the file header.
+        
+        Returns:
+            Tuple of (use_statements: List[str], remaining_content: str)
+        """
+        content = content.strip()
+        root = self._parse(content)
+        
+        use_statements = []
+        first_non_use_idx = None
+        
+        for child in self._get_children(root):
+            if child.type == 'use_declaration':
+                start = self._byte_to_char(content, child.start_byte)
+                end = self._byte_to_char(content, child.end_byte)
+                use_statements.append(content[start:end])
+            elif child.type in ('line_comment', 'block_comment', 'attribute_item'):
+                # Skip comments and attributes between use statements
+                continue
+            else:
+                # Found first non-use declaration
+                first_non_use_idx = self._byte_to_char(content, child.start_byte)
+                break
+        
+        if not use_statements:
+            return ([], content)
+        
+        if first_non_use_idx is None:
+            # Only use statements, no other content
+            return (use_statements, '')
+        
+        remaining = content[first_non_use_idx:].strip()
+        return (use_statements, remaining)
+
+    def add_use_statements_to_header(self, source: str, use_statements: List[str]) -> str:
+        """
+        Add use statements to the file header, avoiding duplicates.
+        
+        Inserts after any existing use statements, or after module attributes
+        if no use statements exist yet.
+        
+        Args:
+            source: The file content
+            use_statements: List of use statement strings to add
+            
+        Returns:
+            Modified source with use statements added
+        """
+        if not use_statements:
+            return source
+        
+        root = self._parse(source)
+        
+        # Collect existing use statements to avoid duplicates
+        existing_uses = set()
+        last_use_end = None
+        first_non_header_start = None
+        
+        for child in self._get_children(root):
+            if child.type == 'use_declaration':
+                start = self._byte_to_char(source, child.start_byte)
+                end = self._byte_to_char(source, child.end_byte)
+                existing_uses.add(source[start:end].strip())
+                last_use_end = end
+            elif child.type in ('attribute_item', 'inner_attribute_item', 'line_comment', 'block_comment'):
+                # These can appear in the header before use statements
+                if last_use_end is None:
+                    continue
+            else:
+                # First non-header item
+                first_non_header_start = self._byte_to_char(source, child.start_byte)
+                break
+        
+        # Filter out duplicates
+        new_uses = [u for u in use_statements if u.strip() not in existing_uses]
+        if not new_uses:
+            return source
+        
+        use_block = '\n'.join(new_uses)
+        
+        if last_use_end is not None:
+            # Insert after the last existing use statement
+            # Find end of line
+            line_end = source.find('\n', last_use_end)
+            if line_end == -1:
+                line_end = len(source)
+            return source[:line_end] + '\n' + use_block + source[line_end:]
+        elif first_non_header_start is not None:
+            # No existing use statements, insert before first declaration
+            return source[:first_non_header_start] + use_block + '\n\n' + source[first_non_header_start:]
+        else:
+            # Empty file or only comments/attributes
+            return source.rstrip() + '\n\n' + use_block + '\n'
+
     def _is_valid_type_with_impl_group(self, declarations: List['Node']) -> bool:
         """
         Check if declarations form a valid type + impl group.
@@ -1135,6 +1234,12 @@ class RustHandler(LanguageHandler):
             raise ValueError('Content required for declare operation')
         
         content = textwrap.dedent(content).strip()
+        
+        # Extract any leading use statements from content
+        # These will be added to the file header, not to the declaration
+        use_statements, content = self.extract_leading_use_statements(content)
+        if use_statements:
+            source = self.add_use_statements_to_header(source, use_statements)
         
         # Unwrap method from impl block if user wrapped it
         if target.is_impl_target and target.associated_name:
