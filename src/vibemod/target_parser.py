@@ -15,7 +15,7 @@ from parsimonious.nodes import NodeVisitor
 # =============================================================================
 
 GRAMMAR = Grammar(r"""
-    target          = type_trait_method / type_trait / module_target
+    target          = type_trait_method / type_trait / use_target / bare_use_path / module_target
     module_target   = module_path? main_target insertion_anchor?
     
     module_path     = (identifier "::")+
@@ -33,6 +33,15 @@ GRAMMAR = Grammar(r"""
     # Type::Trait syntax for trait impls (at top level to avoid module_path conflict)
     type_trait      = identifier "::" identifier !("." / "::")
     type_trait_method = identifier "::" identifier "." method_name
+    
+    # Use statement target: use:path or bare path::{...} or path::*
+    use_target      = "use:" use_path 
+    bare_use_path   = use_path_prefix "::" use_path_suffix 
+    use_path_prefix = identifier ("::" identifier)*
+    use_path_suffix = grouped_import / wildcard
+    grouped_import  = "{" ~r"[^}]+" "}"
+    wildcard        = "*"
+    use_path        = ~r"[^\n@]+"
     
     # Legacy Type.method -> impl:Type.method
     item_method     = identifier "." method_name method_mods?
@@ -102,6 +111,8 @@ class TargetPath:
     # Type namespace targeting
     type_namespace: Optional[str] = None  # The type name when using namespace syntax
     ns_member: Optional[str] = None  # "struct", "impl", or trait name
+    # Use statement targeting
+    use_path: Optional[str] = None  # The path after "use:" e.g. "crate::{foo, bar}"
 
     @property
     def is_impl_target(self) -> bool:
@@ -122,6 +133,10 @@ class TargetPath:
     @property
     def is_type_namespace(self) -> bool:
         return self.type_namespace is not None
+    
+    @property
+    def is_use_target(self) -> bool:
+        return self.use_path is not None
     
     @property
     def is_full_type_namespace(self) -> bool:
@@ -176,6 +191,20 @@ def _extract_from_tree(tree) -> TargetPath:
             result.ns_member = identifiers[1].text
             result.impl_type = identifiers[0].text
             result.impl_trait = identifiers[1].text
+        return result
+    
+    # Check for use targets (use:path or bare path::{...})
+    use_target = _find_node(tree, 'use_target')
+    if use_target:
+        use_path = _find_node(use_target, 'use_path')
+        if use_path:
+            result.use_path = use_path.text
+        return result
+    
+    bare_use_path = _find_node(tree, 'bare_use_path')
+    if bare_use_path:
+        # Reconstruct the full path from the parse tree
+        result.use_path = bare_use_path.text
         return result
     
     # Module path (inside module_target)
@@ -237,6 +266,14 @@ def _extract_main_target(node, result):
             result.type_namespace = ident.text
             result.ns_member = 'impl'
             result.impl_type = ident.text
+        return
+    
+    # Use statement target: use:path
+    use_target = _find_node(node, 'use_target')
+    if use_target:
+        use_path = _find_node(use_target, 'use_path')
+        if use_path:
+            result.use_path = use_path.text
         return
     
     # Type::Trait syntax
@@ -497,6 +534,10 @@ if __name__ == '__main__':
         # Legacy Type.method -> impl method
         "Calculator.add",
         "Calculator.subtract",
+        # Use statement targets
+        "use:std::collections::HashMap",
+        "use:crate::{foo, bar, baz}",
+        "use:crate::{higgs, KernelDigest, Multivector}",
         # Scoped targets
         "my_fn.@after:let x = 1;",
         "my_fn.@before:/assert!\\(/@1",
@@ -523,6 +564,8 @@ if __name__ == '__main__':
                 print(f"    impl_trait={result.impl_trait}")
             if result.associated_name:
                 print(f"    associated_name={result.associated_name}")
+            if result.use_path:
+                print(f"    use_path={result.use_path}")
             if result.occurrence:
                 print(f"    occurrence={result.occurrence}")
             if result.attr_filter:

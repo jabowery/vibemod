@@ -431,6 +431,77 @@ class RustHandler(LanguageHandler):
         
         return None
 
+    def find_use_statement(self, source: str, use_path: str) -> Optional[Tuple[int, int]]:
+        """
+        Find a use statement by its import path.
+        
+        Args:
+            source: The file content
+            use_path: The path to match (e.g., "crate::{foo, bar}" or "std::collections::HashMap")
+            
+        Returns:
+            Tuple of (start, end) character offsets, or None if not found.
+        """
+        root = self._parse(source)
+        
+        # Normalize by removing all spaces (handles "crate::{foo, bar}" vs "crate::{foo,bar}")
+        def normalize(s):
+            return ''.join(s.split())
+        
+        normalized_search = normalize(use_path)
+        
+        for child in self._get_children(root):
+            if child.type == 'use_declaration':
+                start = self._byte_to_char(source, child.start_byte)
+                end = self._byte_to_char(source, child.end_byte)
+                use_text = source[start:end]
+                
+                # Extract the path from "use path;" 
+                # Remove 'use ' prefix and trailing ';'
+                if use_text.startswith('use '):
+                    path_part = use_text[4:].rstrip(';').strip()
+                    normalized_path = normalize(path_part)
+                    
+                    if normalized_path == normalized_search:
+                        return (start, end)
+        
+        return None
+
+    def _normalize_use_content(self, content: str) -> str:
+        """
+        Normalize use statement content.
+        
+        If lines look like use paths but don't start with 'use ', add it.
+        This handles cases where user writes:
+            crate::{foo, bar};
+        instead of:
+            use crate::{foo, bar};
+        """
+        lines = content.split('\n')
+        normalized_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            # Skip empty lines and lines that already start with 'use '
+            if not stripped or stripped.startswith('use '):
+                normalized_lines.append(line)
+                continue
+            
+            # Check if line looks like a use path (identifier::... ending with ;)
+            # Patterns: path::item; or path::{...}; or path::*;
+            if '::' in stripped and stripped.endswith(';'):
+                # Check it starts with an identifier (not a keyword)
+                first_part = stripped.split('::')[0]
+                if first_part.isidentifier() and first_part not in ('fn', 'struct', 'enum', 'impl', 'trait', 'mod', 'const', 'static', 'type', 'pub', 'let'):
+                    # Preserve original indentation
+                    indent = line[:len(line) - len(line.lstrip())]
+                    normalized_lines.append(indent + 'use ' + stripped)
+                    continue
+            
+            normalized_lines.append(line)
+        
+        return '\n'.join(normalized_lines)
+
     def find_statement_by_regex(
         self, 
         content: str, 
@@ -1247,20 +1318,22 @@ class RustHandler(LanguageHandler):
             if unwrapped is not None:
                 content = unwrapped
         
-        single_decl_error = self.validate_single_declaration(content)
-        if single_decl_error:
-            if debug_dump_func:
-                debug_dir = debug_dump_func(
-                    file_path=file_path,
-                    target_path=target_path,
-                    content=content,
-                    source_before=source_before,
-                    source_after=content,
-                    error_message=single_decl_error,
-                    remove=remove
-                )
-                raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
-            raise ValueError(f'Invalid declare content:\n{single_decl_error}')
+        # Skip single declaration validation for use targets (allow multiple use statements)
+        if not target.is_use_target:
+            single_decl_error = self.validate_single_declaration(content)
+            if single_decl_error:
+                if debug_dump_func:
+                    debug_dir = debug_dump_func(
+                        file_path=file_path,
+                        target_path=target_path,
+                        content=content,
+                        source_before=source_before,
+                        source_after=content,
+                        error_message=single_decl_error,
+                        remove=remove
+                    )
+                    raise ValueError(f'Invalid declare content:\n{single_decl_error}\n\nDebug files written to: {debug_dir}')
+                raise ValueError(f'Invalid declare content:\n{single_decl_error}')
         
         # Handle insertion anchors
         if target.is_insertion:
@@ -1272,6 +1345,23 @@ class RustHandler(LanguageHandler):
             after = source[insertion_point:].lstrip()
             new_source = before + '\n\n' + content + '\n\n' + after
             new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
+            return validate_and_return(new_source)
+        
+        # Handle use statement targets - allows multiple use statements as replacement
+        if target.is_use_target:
+            # Normalize content: if first line doesn't start with 'use ' but looks like a path, add 'use '
+            content = self._normalize_use_content(content)
+            
+            # Find the use statement to replace
+            use_span = self.find_use_statement(source, target.use_path)
+            if use_span is None:
+                raise ValueError(
+                    f"Cannot find use statement 'use {target.use_path}' in {file_path}.\n"
+                    f"Make sure the path matches exactly (including spacing in grouped imports)."
+                )
+            start, end = use_span
+            # Replace with content (can be multiple use statements)
+            new_source = source[:start] + content + source[end:]
             return validate_and_return(new_source)
         
         # Handle impl method targets
