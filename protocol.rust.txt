@@ -26,7 +26,7 @@ Rust allows multiple declarations of the "same" symbol name in a file (e.g., mul
 
 8) Targets may specify locations and qualifying with "before" or "after" indicates insertion of the declartaion rather than replacement of the associated item.  Here's the entire grammar for target designation:
 GRAMMAR = Grammar(r"""
-    target          = type_trait_method / type_trait / module_target
+    target          = type_trait_method / type_trait / use_target / bare_use_path / module_target
     module_target   = module_path? main_target insertion_anchor?
     
     module_path     = (identifier "::")+
@@ -44,6 +44,15 @@ GRAMMAR = Grammar(r"""
     # Type::Trait syntax for trait impls (at top level to avoid module_path conflict)
     type_trait      = identifier "::" identifier !("." / "::")
     type_trait_method = identifier "::" identifier "." method_name
+    
+    # Use statement target: use:path or bare path::{...} or path::*
+    use_target      = "use:" use_path 
+    bare_use_path   = use_path_prefix "::" use_path_suffix 
+    use_path_prefix = identifier ("::" identifier)*
+    use_path_suffix = grouped_import / wildcard
+    grouped_import  = "{" ~r"[^}]+" "}"
+    wildcard        = "*"
+    use_path        = ~r"[^\n@]+"
     
     # Legacy Type.method -> impl:Type.method
     item_method     = identifier "." method_name method_mods?
