@@ -4,6 +4,7 @@
 from .base import LanguageHandler, get_handler, register_handler
 from .python_handler import PythonHandler
 from .rust_handler import RustHandler
+from .elixir_handler import ElixirHandler
 
 __all__ = [
     "LanguageHandler",
@@ -11,5 +12,6 @@ __all__ = [
     "register_handler",
     "PythonHandler",
     "RustHandler",
+    "ElixirHandler",
 ]
 

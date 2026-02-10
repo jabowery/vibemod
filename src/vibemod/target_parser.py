@@ -35,8 +35,8 @@ GRAMMAR = Grammar(r"""
     type_trait_method = identifier "::" identifier "." method_name
     
     # Use statement target: use:path or bare path::{...} or path::*
-    use_target      = "use:" use_path 
-    bare_use_path   = use_path_prefix "::" use_path_suffix 
+    use_target      = "use:" use_path
+    bare_use_path   = use_path_prefix "::" use_path_suffix
     use_path_prefix = identifier ("::" identifier)*
     use_path_suffix = grouped_import / wildcard
     grouped_import  = "{" ~r"[^}]+" "}"
@@ -55,9 +55,12 @@ GRAMMAR = Grammar(r"""
     impl_spec       = impl_colon / impl_paren
     impl_colon      = "impl:" type_spec
     impl_paren      = "impl(" type_spec ")"
-    type_spec       = trait_impl / type_name
-    trait_impl      = type_name " for " type_name
-    type_name       = identifier
+    type_spec       = trait_impl / type_name_with_generics
+    trait_impl      = type_name_with_generics " for " type_name_with_generics
+    type_name_with_generics = qualified_type generic_params?
+    qualified_type  = identifier ("::" identifier)*
+    generic_params  = "<" generic_args ">"
+    generic_args    = ~r"[^>]+"
     method_name     = identifier
     
     item_target     = identifier attr_filter? occurrence?
@@ -377,16 +380,46 @@ def _extract_impl_spec(node, result):
     if type_spec:
         trait_impl = _find_node(type_spec, 'trait_impl')
         if trait_impl:
-            # trait_impl: type_name " for " type_name
-            identifiers = _find_all_nodes(trait_impl, 'identifier')
-            if len(identifiers) >= 2:
-                result.impl_trait = identifiers[0].text
-                result.impl_type = identifiers[1].text
+            # trait_impl: type_name_with_generics " for " type_name_with_generics
+            # Find both type_name_with_generics nodes
+            type_nodes = [child for child in trait_impl if child.expr_name == 'type_name_with_generics']
+            if len(type_nodes) >= 2:
+                result.impl_trait = _extract_type_name(type_nodes[0])
+                result.impl_type = _extract_type_name(type_nodes[1])
+            else:
+                # Fallback to old behavior
+                identifiers = _find_all_nodes(trait_impl, 'identifier')
+                if len(identifiers) >= 2:
+                    result.impl_trait = identifiers[0].text
+                    result.impl_type = identifiers[-1].text
         else:
             # Simple type name
-            ident = _find_node(type_spec, 'identifier')
-            if ident:
-                result.impl_type = ident.text
+            type_with_gen = _find_node(type_spec, 'type_name_with_generics')
+            if type_with_gen:
+                result.impl_type = _extract_type_name(type_with_gen)
+            else:
+                ident = _find_node(type_spec, 'identifier')
+                if ident:
+                    result.impl_type = ident.text
+
+def _extract_type_name(node) -> str:
+    """Extract full type name including generics from type_name_with_generics node."""
+    # type_name_with_generics = qualified_type generic_params?
+    qualified = _find_node(node, 'qualified_type')
+    generics = _find_node(node, 'generic_params')
+    
+    if qualified:
+        # qualified_type = identifier ("::" identifier)*
+        # Just get the full text of the qualified type
+        base_name = qualified.text
+    else:
+        # Fallback
+        ident = _find_node(node, 'identifier')
+        base_name = ident.text if ident else ''
+    
+    if generics:
+        return base_name + generics.text
+    return base_name
 
 def _extract_item_target(node, result):
     """Extract from item_target: identifier attr_filter? occurrence?"""

@@ -1026,9 +1026,8 @@ class RustHandler(LanguageHandler):
             all_spans.append(('struct', adj_start, adj_end))
         
         for start, end, impl_type in spans_to_remove:
-            start_char = self._byte_to_char(source, start)
-            end_char = self._byte_to_char(source, end)
-            adj_start, adj_end = self.adjust_span_for_attributes(source, start_char, end_char, content)
+            # start/end are already char offsets from IndexedItem.start_byte/end_byte
+            adj_start, adj_end = self.adjust_span_for_attributes(source, start, end, content)
             all_spans.append((impl_type, adj_start, adj_end))
         
         # Sort in reverse order
@@ -1347,6 +1346,49 @@ class RustHandler(LanguageHandler):
             new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
             return validate_and_return(new_source)
         
+        # Handle type namespace targets (TypeName.struct, TypeName.impl, etc.)
+        if target.is_type_namespace and target.ns_member:
+            if target.ns_member == 'struct':
+                # Find and replace just the struct
+                span = self.find_declaration(source, target.type_namespace)
+                if span:
+                    start, end = span
+                    adj_start, adj_end = self.adjust_span_for_attributes(source, start, end, content)
+                    new_source = source[:adj_start] + content + source[adj_end:]
+                    return validate_and_return(new_source)
+                else:
+                    # Struct not found - append
+                    new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
+                    return validate_and_return(new_source)
+            elif target.ns_member == 'impl':
+                # Find and replace the inherent impl block
+                # Use impl_type which was set by the parser
+                impl_target_path = f"impl:{target.type_namespace}"
+                spans = self.find_all_declarations(source, impl_target_path)
+                if spans:
+                    # Replace all inherent impl blocks with the new one
+                    adjusted_spans = [
+                        self.adjust_span_for_attributes(source, s, e, content)
+                        for s, e in spans
+                    ]
+                    adjusted_spans.sort(key=lambda s: s[0], reverse=True)
+                    new_source = source
+                    for i, (start, end) in enumerate(adjusted_spans):
+                        if i == 0:
+                            new_source = new_source[:start] + content + new_source[end:]
+                        else:
+                            # Remove additional impl blocks
+                            before = new_source[:start].rstrip()
+                            after = new_source[end:].lstrip()
+                            new_source = before + '\n\n' + after
+                    new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
+                    return validate_and_return(new_source)
+                else:
+                    # No impl block found - append
+                    new_source = source.rstrip() + '\n\n' + content + '\n' if source.strip() else content + '\n'
+                    return validate_and_return(new_source)
+            # For trait impl targets (TypeName.TraitName), fall through to impl handling below
+        
         # Handle use statement targets - allows multiple use statements as replacement
         if target.is_use_target:
             # Normalize content: if first line doesn't start with 'use ' but looks like a path, add 'use '
@@ -1448,6 +1490,15 @@ class RustHandler(LanguageHandler):
         
         # Standard declaration replacement
         spans = self.find_all_declarations(source, target_path)
+        
+        # Check if content is a type + impl group (struct/enum + impl blocks)
+        # If so, handle specially even if we found the struct
+        group_info = self._parse_type_impl_group(content)
+        if group_info and target.item_name:
+            return self._replace_type_impl_group(
+                source, target.item_name, content, group_info, file_path, validate_and_return
+            )
+        
         if spans:
             adjusted_spans = [
                 self.adjust_span_for_attributes(source, s, e, content)
@@ -1458,14 +1509,6 @@ class RustHandler(LanguageHandler):
             for start, end in adjusted_spans:
                 new_source = new_source[:start] + content + new_source[end:]
             return validate_and_return(new_source)
-        
-        # Check if content is a type + impl group (struct/enum + inherent impl)
-        # If so, handle specially: replace struct, merge/replace inherent impls
-        group_info = self._parse_type_impl_group(content)
-        if group_info and target.item_name:
-            return self._replace_type_impl_group(
-                source, target.item_name, content, group_info, file_path, validate_and_return
-            )
         
         # Declaration not found - append to end of file
         # This applies to both regular items (struct, fn, etc.) and impl blocks
