@@ -75,6 +75,27 @@ class TestTargetPathParsing:
         assert target.item_name == "handle_call"
         assert target.arity == 3
         assert target.occurrence == 1
+    
+    def test_signature_pattern(self, handler):
+        target = handler.parse_target_path("MyModule.handle_info/2@{:ts_event, :out, _}")
+        assert target.item_name == "handle_info"
+        assert target.arity == 2
+        assert target.signature_pattern == "{:ts_event, :out, _}"
+        assert target.occurrence is None
+    
+    def test_signature_pattern_atom(self, handler):
+        target = handler.parse_target_path("MyModule.handle_info/2@:timeout")
+        assert target.signature_pattern == ":timeout"
+    
+    def test_signature_vs_occurrence(self, handler):
+        """@N is occurrence, @pattern is signature."""
+        occ = handler.parse_target_path("MyModule.func/2@3")
+        assert occ.occurrence == 3
+        assert occ.signature_pattern is None
+        
+        sig = handler.parse_target_path("MyModule.func/2@{:foo, _}")
+        assert sig.occurrence is None
+        assert sig.signature_pattern == "{:foo, _}"
 
 
 # =============================================================================
@@ -190,6 +211,25 @@ end
         assert len(func.attrs) == 1
         assert "@doc" in func.attrs[0]
     
+    def test_function_signature_extraction(self, handler):
+        """Test that function signatures are extracted and normalized."""
+        code = '''
+defmodule MyServer do
+  def handle_info({:ts_event, :out, tuple}, state), do: state
+  def handle_info({:ts_event, :in, msg}, state), do: state
+  def handle_info(:timeout, state), do: state
+end
+'''
+        items = handler._build_item_index(code)
+        funcs = [i for i in items if i.kind == "def"]
+        
+        assert len(funcs) == 3
+        
+        signatures = [f.signature for f in funcs]
+        assert "{:ts_event,:out,_}" in signatures
+        assert "{:ts_event,:in,_}" in signatures
+        assert ":timeout" in signatures
+    
     def test_moduledoc_not_attached_to_function(self, handler):
         code = '''
 defmodule MyModule do
@@ -298,6 +338,35 @@ end
         assert span is not None
         content = code[span[0]:span[1]]
         assert ":reset" in content
+    
+    def test_find_by_signature_pattern(self, handler):
+        """Find function clause by first argument pattern."""
+        code = '''
+defmodule MyServer do
+  def handle_info({:ts_event, :out, tuple}, state), do: {:noreply, state}
+  def handle_info({:ts_event, :in, msg}, state), do: {:noreply, state}
+  def handle_info(:timeout, state), do: {:noreply, state}
+end
+'''
+        # Find by :out pattern
+        span = handler.find_declaration(code, "MyServer.handle_info/2@{:ts_event, :out, _}")
+        assert span is not None
+        content = code[span[0]:span[1]]
+        assert ":out" in content
+        assert ":in" not in content
+        
+        # Find by :in pattern
+        span = handler.find_declaration(code, "MyServer.handle_info/2@{:ts_event, :in, _}")
+        assert span is not None
+        content = code[span[0]:span[1]]
+        assert ":in" in content
+        assert ":out" not in content
+        
+        # Find by :timeout atom
+        span = handler.find_declaration(code, "MyServer.handle_info/2@:timeout")
+        assert span is not None
+        content = code[span[0]:span[1]]
+        assert ":timeout" in content
     
     def test_find_nonexistent_returns_none(self, handler):
         code = '''
@@ -431,6 +500,45 @@ end
         
         assert "Hi there" in result
         assert "Hello," not in result
+    
+    def test_replace_function_infers_signature(self, handler):
+        """When content has a def, infer its signature for disambiguation."""
+        source = '''
+defmodule MyServer do
+  def handle_info({:ts_event, :out, tuple}, s) do
+    {:noreply, s}
+  end
+  
+  def handle_info({:ts_event, :in, tuple}, s) do
+    {:noreply, s}
+  end
+  
+  def handle_info(:timeout, s) do
+    {:noreply, s}
+  end
+end
+'''
+        # Replace the :out handler - signature should be inferred from content
+        new_content = '''def handle_info({:ts_event, :out, tuple}, s) do
+    # Updated :out handler
+    {:noreply, s}
+  end'''
+        
+        result = handler.modify_declaration(
+            file_path="test.ex",
+            source=source,
+            target_path="MyServer.handle_info",
+            content=new_content,
+            remove=False
+        )
+        
+        # Should only replace the :out handler
+        assert "Updated :out handler" in result
+        # Other handlers should remain unchanged
+        assert result.count("def handle_info") == 3
+        # The :in and :timeout handlers should still be there
+        assert "{:ts_event, :in, tuple}" in result
+        assert ":timeout" in result
     
     def test_replace_module(self, handler):
         source = '''

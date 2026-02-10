@@ -35,6 +35,7 @@ class IndexedItem:
     start_byte: int  # Character offset (despite the name)
     end_byte: int    # Character offset
     arity: Optional[int] = None  # For functions
+    signature: Optional[str] = None  # Normalized first argument pattern for functions
     attrs: List[str] = field(default_factory=list)  # Module attributes before this
     associated_items: List['IndexedItem'] = field(default_factory=list)
     parent_module: Optional['IndexedItem'] = None
@@ -52,7 +53,8 @@ class TargetPath:
     item_name: Optional[str] = None  # Function/macro name
     arity: Optional[int] = None  # Function arity
     is_private: bool = False  # defp vs def
-    occurrence: Optional[int] = None  # @N occurrence selector
+    occurrence: Optional[int] = None  # @N occurrence selector (integer)
+    signature_pattern: Optional[str] = None  # @pattern signature matcher
     
     @property
     def is_module_target(self) -> bool:
@@ -61,6 +63,10 @@ class TargetPath:
     @property
     def is_function_target(self) -> bool:
         return self.item_name is not None
+    
+    @property
+    def has_signature_match(self) -> bool:
+        return self.signature_pattern is not None
 
 
 class ElixirHandler(LanguageHandler):
@@ -189,6 +195,261 @@ class ElixirHandler(LanguageHandler):
         
         return 0
     
+    def _extract_function_signature(self, node: Any, content: str) -> Optional[str]:
+        """
+        Extract a normalized signature from a function definition.
+        
+        The signature is the first argument's pattern, normalized:
+        - Variable names replaced with _
+        - Whitespace normalized
+        
+        Examples:
+            def handle_info({:ts_event, :out, tuple}, s) -> "{:ts_event, :out, _}"
+            def handle_info(:timeout, s) -> ":timeout"
+            def process(%User{name: name}, opts) -> "%User{name: _}"
+        """
+        args = None
+        for child in self._get_children(node):
+            if child.type == 'arguments':
+                args = child
+                break
+        
+        if args is None:
+            return None
+        
+        # Find the function call within arguments
+        for child in self._get_children(args):
+            if child.type == 'call':
+                # Get the function's arguments
+                call_args = None
+                for subchild in self._get_children(child):
+                    if subchild.type == 'arguments':
+                        call_args = subchild
+                        break
+                
+                if call_args is None:
+                    return None
+                
+                # Get the first argument
+                first_arg = None
+                for subchild in self._get_children(call_args):
+                    if subchild.type not in ('(', ')', ','):
+                        first_arg = subchild
+                        break
+                
+                if first_arg is None:
+                    return None
+                
+                # Extract and normalize the first argument
+                start = self._byte_to_char(content, first_arg.start_byte)
+                end = self._byte_to_char(content, first_arg.end_byte)
+                raw_sig = content[start:end].strip()
+                
+                return self._normalize_signature(raw_sig)
+            
+            elif child.type == 'identifier':
+                # def foo - no args, no signature
+                return None
+            
+            elif child.type == 'binary_operator':
+                # def foo(x) when is_integer(x) - has a when clause
+                # The left side is the actual function call
+                left = child.child_by_field_name('left')
+                if left and left.type == 'call':
+                    call_args = None
+                    for subchild in self._get_children(left):
+                        if subchild.type == 'arguments':
+                            call_args = subchild
+                            break
+                    
+                    if call_args:
+                        first_arg = None
+                        for subchild in self._get_children(call_args):
+                            if subchild.type not in ('(', ')', ','):
+                                first_arg = subchild
+                                break
+                        
+                        if first_arg:
+                            start = self._byte_to_char(content, first_arg.start_byte)
+                            end = self._byte_to_char(content, first_arg.end_byte)
+                            raw_sig = content[start:end].strip()
+                            return self._normalize_signature(raw_sig)
+        
+        return None
+    
+    def _normalize_signature(self, sig: str) -> str:
+        """
+        Normalize a signature pattern for matching.
+        
+        - Replace variable names (lowercase identifiers) with _
+        - Normalize whitespace
+        - Keep atoms, tuples, structs, literals intact
+        """
+        # Tokenize and normalize
+        result = []
+        i = 0
+        
+        while i < len(sig):
+            c = sig[i]
+            
+            # Skip whitespace, normalize to single space
+            if c.isspace():
+                if result and result[-1] != ' ':
+                    result.append(' ')
+                i += 1
+                continue
+            
+            # Atoms - keep as is
+            if c == ':':
+                result.append(c)
+                i += 1
+                # Read the atom name
+                while i < len(sig) and (sig[i].isalnum() or sig[i] == '_'):
+                    result.append(sig[i])
+                    i += 1
+                continue
+            
+            # Strings - keep as is
+            if c == '"':
+                result.append(c)
+                i += 1
+                while i < len(sig) and sig[i] != '"':
+                    if sig[i] == '\\' and i + 1 < len(sig):
+                        result.append(sig[i])
+                        result.append(sig[i + 1])
+                        i += 2
+                    else:
+                        result.append(sig[i])
+                        i += 1
+                if i < len(sig):
+                    result.append(sig[i])  # closing quote
+                    i += 1
+                continue
+            
+            # Struct names (uppercase start) - keep as is
+            if c == '%':
+                result.append(c)
+                i += 1
+                # Read the struct name
+                while i < len(sig) and (sig[i].isalnum() or sig[i] in '_.'):
+                    result.append(sig[i])
+                    i += 1
+                continue
+            
+            # Numbers - keep as is
+            if c.isdigit():
+                while i < len(sig) and (sig[i].isdigit() or sig[i] == '.'):
+                    result.append(sig[i])
+                    i += 1
+                continue
+            
+            # Punctuation and operators - keep as is
+            if c in '{}[](),|=><+-*/_^&!?@#':
+                result.append(c)
+                i += 1
+                continue
+            
+            # Identifiers
+            if c.isalpha() or c == '_':
+                # Read the full identifier
+                ident_start = i
+                while i < len(sig) and (sig[i].isalnum() or sig[i] == '_'):
+                    i += 1
+                ident = sig[ident_start:i]
+                
+                # Check if it's a variable (starts with lowercase or _) vs module/atom
+                if ident[0].islower() or ident[0] == '_':
+                    # It's a variable - replace with _
+                    result.append('_')
+                else:
+                    # It's a module name or similar - keep as is
+                    result.append(ident)
+                continue
+            
+            # Anything else - keep as is
+            result.append(c)
+            i += 1
+        
+        normalized = ''.join(result).strip()
+        # Collapse multiple spaces
+        normalized = re.sub(r' +', ' ', normalized)
+        # Remove spaces around punctuation for cleaner matching
+        normalized = re.sub(r'\s*([{}[\](),|])\s*', r'\1', normalized)
+        
+        return normalized
+    
+    def _signatures_match(self, indexed_sig: Optional[str], target_sig: str) -> bool:
+        """
+        Check if an indexed signature matches a target signature pattern.
+        
+        The target pattern can use _ as a wildcard.
+        """
+        if indexed_sig is None:
+            return False
+        
+        # Normalize the target signature the same way
+        target_normalized = self._normalize_signature(target_sig)
+        
+        # Direct match
+        if indexed_sig == target_normalized:
+            return True
+        
+        # Pattern match with _ as wildcard
+        # Convert both to a simple pattern matching
+        return self._pattern_match(indexed_sig, target_normalized)
+    
+    def _pattern_match(self, actual: str, pattern: str) -> bool:
+        """
+        Match actual signature against pattern.
+        Both are already normalized.
+        
+        _ in pattern matches any single "token" in actual.
+        """
+        # Simple approach: split by structure and compare
+        # For now, just check if the structural parts match
+        
+        # If pattern has wildcards, try to match structurally
+        if '_' not in pattern:
+            return actual == pattern
+        
+        # Extract the "skeleton" - the structural parts without variables
+        def extract_skeleton(s):
+            # Keep only: atoms, punctuation, module names
+            # This gives us the pattern structure
+            parts = []
+            i = 0
+            while i < len(s):
+                c = s[i]
+                if c == ':':
+                    # Atom - keep it
+                    atom = ':'
+                    i += 1
+                    while i < len(s) and (s[i].isalnum() or s[i] == '_'):
+                        atom += s[i]
+                        i += 1
+                    parts.append(atom)
+                elif c in '{}[](),|%':
+                    parts.append(c)
+                    i += 1
+                elif c == '_':
+                    parts.append('_')
+                    i += 1
+                elif c.isupper():
+                    # Module name
+                    name = ''
+                    while i < len(s) and (s[i].isalnum() or s[i] in '_.'):
+                        name += s[i]
+                        i += 1
+                    parts.append(name)
+                else:
+                    i += 1
+            return ''.join(parts)
+        
+        actual_skeleton = extract_skeleton(actual)
+        pattern_skeleton = extract_skeleton(pattern)
+        
+        return actual_skeleton == pattern_skeleton
+    
     # =========================================================================
     # TARGET PATH PARSING
     # =========================================================================
@@ -198,23 +459,34 @@ class ElixirHandler(LanguageHandler):
         Parse an Elixir target path.
         
         Supported formats:
-        - MyModule                    -> module
-        - MyModule.SubModule          -> nested module
-        - MyModule.function_name      -> function in module
-        - MyModule.function_name/2    -> function with arity
-        - function_name               -> top-level function (rare)
-        - defp:function_name          -> private function
-        - MyModule.defp:func          -> private function in module
-        - target@N                    -> Nth occurrence
+        - MyModule                         -> module
+        - MyModule.SubModule               -> nested module
+        - MyModule.function_name           -> function in module
+        - MyModule.function_name/2         -> function with arity
+        - function_name                    -> top-level function (rare)
+        - defp:function_name               -> private function
+        - MyModule.defp:func               -> private function in module
+        - target@N                         -> Nth occurrence (integer)
+        - target/2@{:pattern, _}           -> match by first arg pattern
+        - target/2@:atom                   -> match by first arg atom
         """
         result = TargetPath()
         path = target_path.strip()
         
-        # Check for occurrence selector @N
-        occ_match = re.search(r'@(\d+)$', path)
-        if occ_match:
-            result.occurrence = int(occ_match.group(1))
-            path = path[:occ_match.start()]
+        # Check for signature pattern @pattern (non-numeric after @)
+        # Must check this BEFORE occurrence to distinguish @1 from @{:tuple}
+        sig_match = re.search(r'@([^@].*)$', path)
+        if sig_match:
+            potential_sig = sig_match.group(1)
+            # Check if it's a pure integer (occurrence) or a pattern (signature)
+            if re.match(r'^\d+$', potential_sig):
+                # It's an occurrence selector @N
+                result.occurrence = int(potential_sig)
+                path = path[:sig_match.start()]
+            else:
+                # It's a signature pattern
+                result.signature_pattern = potential_sig.strip()
+                path = path[:sig_match.start()]
         
         # Check for arity /N
         arity_match = re.search(r'/(\d+)$', path)
@@ -318,8 +590,10 @@ class ElixirHandler(LanguageHandler):
                     
                     name = self._extract_def_name(child, keyword)
                     arity = None
+                    signature = None
                     if keyword in ('def', 'defp', 'defmacro', 'defmacrop', 'defguard', 'defguardp'):
                         arity = self._extract_function_arity(child)
+                        signature = self._extract_function_signature(child, content)
                     
                     item = IndexedItem(
                         kind=keyword,
@@ -328,6 +602,7 @@ class ElixirHandler(LanguageHandler):
                         start_byte=start_char,
                         end_byte=end_char,
                         arity=arity,
+                        signature=signature,
                         attrs=list(pending_attrs),
                         parent_module=parent_module
                     )
@@ -443,21 +718,9 @@ class ElixirHandler(LanguageHandler):
                 if item.arity != target.arity:
                     return False
             
-            return True
-        
-        return False
-        if target.is_function_target:
-            if item.name != target.item_name:
-                return False
-            
-            # Check private/public
-            if target.is_private:
-                if item.kind not in ('defp', 'defmacrop', 'defguardp'):
-                    return False
-            
-            # Check arity if specified
-            if target.arity is not None:
-                if item.arity != target.arity:
+            # Check signature pattern if specified
+            if target.signature_pattern is not None:
+                if not self._signatures_match(item.signature, target.signature_pattern):
                     return False
             
             return True
@@ -617,12 +880,152 @@ class ElixirHandler(LanguageHandler):
             elif item.kind in ('def', 'defp', 'defmacro', 'defmacrop'):
                 mod_path = '.'.join(item.module_path) + '.' if item.module_path else ''
                 arity_str = f"/{item.arity}" if item.arity is not None else ""
-                candidates.append(f"  {item.kind} {mod_path}{item.name}{arity_str}")
+                sig_str = f"  sig: {item.signature}" if item.signature else ""
+                candidates.append(f"  {item.kind} {mod_path}{item.name}{arity_str}{sig_str}")
         
         if not candidates:
             return f"No declarations found in file. Target was: {target_path}"
         
         return f"Target '{target_path}' not found. Available declarations:\n" + "\n".join(candidates[:20])
+    
+    def _extract_signature_from_content(self, content: str) -> Optional[str]:
+        """
+        Extract the function signature from replacement content.
+        
+        If content contains a function definition (def/defp/etc), extract
+        the normalized first argument pattern to use for disambiguation.
+        
+        Returns:
+            Normalized signature string, or None if not extractable
+        """
+        content = content.strip()
+        
+        # Skip leading attributes like @impl, @doc
+        root = self._parse(content)
+        
+        for child in self._get_children(root):
+            if child.type == 'call':
+                keyword = self._get_call_keyword(child)
+                if keyword in ('def', 'defp', 'defmacro', 'defmacrop', 'defguard', 'defguardp'):
+                    # Found a function definition - extract its signature
+                    return self._extract_function_signature(child, content)
+            elif child.type == 'unary_operator':
+                # Skip attributes (@impl, @doc, etc.)
+                continue
+        
+        return None
+    
+    def modify_declaration(self, file_path: str, source: str, target_path: str, 
+                          content: Optional[str], remove: bool, debug_dump_func=None) -> str:
+        """
+        Modify a declaration in Elixir source code.
+        
+        Overrides base to handle Elixir-specific concerns:
+        - Infers signature from content to disambiguate multi-clause functions
+        - Preserves indentation when replacing function clauses
+        """
+        target = self.parse_target_path(target_path)
+        
+        # Check for ambiguous multi-clause function matches
+        if target.is_function_target and not remove and content:
+            spans = self.find_all_declarations(source, target_path)
+            if len(spans) > 1 and target.signature_pattern is None and target.occurrence is None:
+                # Multiple matches and no disambiguation provided
+                # Try to infer signature from the content
+                content_signature = self._extract_signature_from_content(content)
+                
+                if content_signature:
+                    # Use the inferred signature to disambiguate
+                    new_target_path = f"{target_path}@{content_signature}"
+                    target = self.parse_target_path(new_target_path)
+                    target_path = new_target_path
+                    
+                    # Re-check if we now have a single match
+                    spans = self.find_all_declarations(source, target_path)
+                
+                if len(spans) > 1:
+                    # Still ambiguous - require explicit disambiguation
+                    items = self._build_item_index(source)
+                    matches = self._find_matches(items, self.parse_target_path(target_path.split('@')[0]))
+                    
+                    # Build helpful error message
+                    clause_info = []
+                    for i, item in enumerate(matches, 1):
+                        if item.signature:
+                            clause_info.append(f"  @{i} or @{item.signature}")
+                        else:
+                            clause_info.append(f"  @{i}")
+                    
+                    raise ValueError(
+                        f"Ambiguous target: '{target_path}' matches {len(matches)} function clauses.\n"
+                        f"Please disambiguate using occurrence (@N) or signature pattern (@pattern):\n"
+                        + "\n".join(clause_info) + "\n\n"
+                        f"Example: {target_path}@1 or {target_path}@{matches[0].signature if matches[0].signature else '{{:pattern, _}}'}"
+                    )
+        
+        # For single matches or removals, handle with indentation preservation
+        if not remove and content:
+            spans = self.find_all_declarations(source, target_path)
+            if spans:
+                # Preserve indentation from original
+                start, end = spans[0]
+                original_text = source[start:end]
+                
+                # Find the indentation of the original declaration
+                line_start = source.rfind('\n', 0, start) + 1
+                original_indent = ''
+                for c in source[line_start:start]:
+                    if c in ' \t':
+                        original_indent += c
+                    else:
+                        break
+                
+                # Check if content needs indentation adjustment
+                content_stripped = content.strip()
+                content_lines = content_stripped.split('\n')
+                
+                # Re-indent content to match original
+                if original_indent and content_lines:
+                    # Find the base indentation of the content
+                    content_base_indent = ''
+                    for c in content_lines[0]:
+                        if c in ' \t':
+                            content_base_indent += c
+                        else:
+                            break
+                    
+                    # Re-indent all lines
+                    reindented_lines = []
+                    for line in content_lines:
+                        if line.strip():
+                            # Remove content's base indent and add original indent
+                            if line.startswith(content_base_indent):
+                                line = original_indent + line[len(content_base_indent):]
+                            else:
+                                line = original_indent + line.lstrip()
+                        reindented_lines.append(line)
+                    
+                    content = '\n'.join(reindented_lines)
+                
+                # Do the replacement directly (don't call super which would dedent)
+                new_source = source[:start] + content + source[end:]
+                
+                # Validate syntax
+                syntax_error = self.validate_syntax(new_source, original_content=source)
+                if syntax_error:
+                    if debug_dump_func:
+                        debug_dir = debug_dump_func(
+                            file_path=file_path, target_path=target_path, 
+                            content=content, source_before=source, 
+                            source_after=new_source, error_message=syntax_error, remove=remove
+                        )
+                        raise ValueError(f'Modification would create syntactically invalid code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
+                    raise ValueError(f'Modification would create syntactically invalid code:\n{syntax_error}')
+                
+                return new_source
+        
+        # For removals or new declarations, delegate to base class
+        return super().modify_declaration(file_path, source, target_path, content, remove, debug_dump_func)
     
     # =========================================================================
     # UPDATE HEADER
