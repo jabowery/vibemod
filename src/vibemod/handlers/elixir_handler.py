@@ -623,6 +623,158 @@ class ElixirHandler(LanguageHandler):
             return f"No declarations found in file. Target was: {target_path}"
         
         return f"Target '{target_path}' not found. Available declarations:\n" + "\n".join(candidates[:20])
+    
+    # =========================================================================
+    # UPDATE HEADER
+    # =========================================================================
+    
+    def update_header(self, source: str, new_header: str) -> str:
+        """
+        Replace the header section of an Elixir source file.
+        
+        Special Elixir behavior:
+        - If new_header starts with 'defmodule', treat it as module-internal header:
+          Replace content inside that module up to (but not including) the first def*.
+        - Otherwise, replace file-level content before the first defmodule/def*.
+        
+        Args:
+            source: Current file content
+            new_header: New header content
+            
+        Returns:
+            Modified source code
+        """
+        new_header = new_header.strip()
+        
+        # Check if new_header starts with defmodule
+        if self._content_starts_with_defmodule(new_header):
+            return self._update_module_header(source, new_header)
+        else:
+            # Standard file-level header update
+            header_end = self.find_header_end(source)
+            return new_header + '\n\n' + source[header_end:]
+    
+    def _content_starts_with_defmodule(self, content: str) -> bool:
+        """Check if content starts with a defmodule declaration."""
+        stripped = content.lstrip()
+        return stripped.startswith('defmodule ')
+    
+    def _update_module_header(self, source: str, new_header: str) -> str:
+        """
+        Update the header section inside a module.
+        
+        Replaces everything from 'defmodule ModName do' up to (but not including)
+        the first def/defp/defmacro/etc inside that module.
+        """
+        # Parse new_header to get the module name
+        new_header_root = self._parse(new_header)
+        new_module_name = None
+        
+        for child in self._get_children(new_header_root):
+            if child.type == 'call':
+                keyword = self._get_call_keyword(child)
+                if keyword == 'defmodule':
+                    new_module_name = self._extract_def_name(child, keyword)
+                    break
+        
+        if not new_module_name:
+            # Couldn't parse module name, fall back to file-level update
+            header_end = self.find_header_end(source)
+            return new_header + '\n\n' + source[header_end:]
+        
+        # Find the matching module in source
+        source_root = self._parse(source)
+        module_node = None
+        
+        for child in self._get_children(source_root):
+            if child.type == 'call':
+                keyword = self._get_call_keyword(child)
+                if keyword == 'defmodule':
+                    name = self._extract_def_name(child, keyword)
+                    if name == new_module_name:
+                        module_node = child
+                        break
+        
+        if not module_node:
+            # Module not found in source, append the new header content
+            return source.rstrip() + '\n\n' + new_header + '\n'
+        
+        # Find the do_block inside the module
+        do_block = self._find_do_block(module_node)
+        if not do_block:
+            # No do block, replace entire module
+            start = self._byte_to_char(source, module_node.start_byte)
+            end = self._byte_to_char(source, module_node.end_byte)
+            return source[:start] + new_header + source[end:]
+        
+        # Find the first def* inside the do_block
+        first_def_start = None
+        for child in self._get_children(do_block):
+            if child.type == 'call':
+                keyword = self._get_call_keyword(child)
+                if keyword in ('def', 'defp', 'defmacro', 'defmacrop', 'defguard', 'defguardp', 'defdelegate'):
+                    first_def_start = self._byte_to_char(source, child.start_byte)
+                    break
+        
+        if first_def_start is None:
+            # No def* found, replace entire module
+            start = self._byte_to_char(source, module_node.start_byte)
+            end = self._byte_to_char(source, module_node.end_byte)
+            return source[:start] + new_header + source[end:]
+        
+        # Check if there are attributes (like @doc) right before the first def
+        # We want to preserve those with the def, not replace them
+        first_def_start = self._find_attr_start_before_def(source, do_block, first_def_start)
+        
+        # Get module start position
+        module_start = self._byte_to_char(source, module_node.start_byte)
+        
+        # Get the end of the module (the 'end' keyword)
+        module_end = self._byte_to_char(source, module_node.end_byte)
+        
+        # Build the new source:
+        # - Everything before this module
+        # - New header content (which includes defmodule ... do and module-level stuff)
+        # - Everything from first def* to module end
+        # - Everything after module end
+        
+        # The new_header should end with the content up to first def
+        # We need to ensure proper newlines
+        rest_of_module = source[first_def_start:module_end]
+        
+        # Ensure new_header ends properly for concatenation
+        if not new_header.endswith('\n'):
+            new_header = new_header + '\n'
+        
+        # Add proper spacing before the first def
+        new_header = new_header.rstrip() + '\n\n  '
+        
+        return source[:module_start] + new_header + rest_of_module.lstrip() + source[module_end:]
+    
+    def _find_attr_start_before_def(self, source: str, do_block: Any, def_start: int) -> int:
+        """
+        Find if there are @doc or similar attributes right before the def.
+        If so, return the start of those attributes to preserve them with the def.
+        """
+        # Look for unary_operator (@) nodes right before the def
+        prev_attr_start = def_start
+        
+        for child in self._get_children(do_block):
+            if child.type == 'unary_operator':
+                child_end = self._byte_to_char(source, child.end_byte)
+                child_start = self._byte_to_char(source, child.start_byte)
+                
+                # Check if this attribute is right before our def (only whitespace between)
+                between = source[child_end:def_start].strip()
+                if between == '':
+                    # Check if it's a function-level attribute (not @moduledoc etc)
+                    attr_text = source[child_start:child_end].strip()
+                    attr_name = attr_text.split()[0] if attr_text else ''
+                    if attr_name not in ('@moduledoc', '@behaviour', '@callback', '@type', '@typep', '@opaque', '@spec'):
+                        prev_attr_start = min(prev_attr_start, child_start)
+                        def_start = child_start  # Look for more attrs before this one
+        
+        return prev_attr_start
 
 
 # Register the handler

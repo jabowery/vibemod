@@ -614,6 +614,112 @@ end
 
 
 # =============================================================================
+# UPDATE HEADER
+# =============================================================================
+
+class TestUpdateHeader:
+    """Tests for update_header method."""
+    
+    def test_module_header_update(self, handler):
+        """Update header inside a module (defmodule in new_header)."""
+        source = '''defmodule MyApp.Users do
+  @moduledoc """
+  Old documentation.
+  """
+
+  alias OldAlias
+
+  def get_user(id), do: id
+  def create_user(attrs), do: attrs
+end
+'''
+        new_header = '''defmodule MyApp.Users do
+  @moduledoc """
+  New documentation.
+  """
+
+  alias NewAlias
+  alias AnotherAlias'''
+        
+        result = handler.update_header(source, new_header)
+        
+        # New header content should be present
+        assert "New documentation" in result
+        assert "NewAlias" in result
+        assert "AnotherAlias" in result
+        
+        # Old header content should be gone
+        assert "Old documentation" not in result
+        assert "OldAlias" not in result
+        
+        # Functions should be preserved
+        assert "def get_user" in result
+        assert "def create_user" in result
+        
+        # Module should still be properly closed
+        assert result.strip().endswith("end")
+    
+    def test_file_header_update(self, handler):
+        """Update file-level header (no defmodule in new_header)."""
+        source = '''# Old comment
+# Another old comment
+
+defmodule MyModule do
+  def hello, do: :world
+end
+'''
+        new_header = '''# New file header
+# With new comments'''
+        
+        result = handler.update_header(source, new_header)
+        
+        assert "New file header" in result
+        assert "Old comment" not in result
+        assert "defmodule MyModule" in result
+        assert "def hello" in result
+    
+    def test_module_header_preserves_function_attrs(self, handler):
+        """@doc before functions should be preserved, not replaced."""
+        source = '''defmodule MyModule do
+  @moduledoc "Module doc"
+
+  @doc "Function doc"
+  def hello, do: :world
+end
+'''
+        new_header = '''defmodule MyModule do
+  @moduledoc "New module doc"
+
+  alias SomeAlias'''
+        
+        result = handler.update_header(source, new_header)
+        
+        assert "New module doc" in result
+        assert "@doc" in result  # Function @doc should be preserved
+        assert "Function doc" in result
+        assert "def hello" in result
+    
+    def test_module_header_with_nested_name(self, handler):
+        """Handle deeply nested module names."""
+        source = '''defmodule MyApp.Web.Controllers.UserController do
+  @moduledoc "Old"
+  
+  def index(conn, _params), do: conn
+end
+'''
+        new_header = '''defmodule MyApp.Web.Controllers.UserController do
+  @moduledoc "New"
+  
+  import MyApp.Web.Helpers'''
+        
+        result = handler.update_header(source, new_header)
+        
+        assert 'moduledoc "New"' in result
+        assert "import MyApp.Web.Helpers" in result
+        assert "def index" in result
+
+
+# =============================================================================
 # DIAGNOSTIC OUTPUT
 # =============================================================================
 
