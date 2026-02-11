@@ -4,9 +4,7 @@ Target path formats:
 
 MyApp.Users → module
 MyApp.Users.SubModule → nested module
-MyApp.Users.get_user → function in module
-MyApp.Users.get_user/1 → function with specific arity
-MyApp.Users.defp:validate_email → private function
+MyApp.Users.get_user → function in module Users
 target@N → Nth occurrence
 
 Features:
