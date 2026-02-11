@@ -425,10 +425,14 @@ class ElixirHandler(LanguageHandler):
             while i < len(s):
                 c = s[i]
                 if c == ':':
-                    # Atom - keep it
+                    # Atom - keep it (including ? or ! suffix)
                     atom = ':'
                     i += 1
                     while i < len(s) and (s[i].isalnum() or s[i] == '_'):
+                        atom += s[i]
+                        i += 1
+                    # Elixir atoms can end with ? or !
+                    if i < len(s) and s[i] in '?!':
                         atom += s[i]
                         i += 1
                     parts.append(atom)
@@ -946,6 +950,11 @@ class ElixirHandler(LanguageHandler):
                     
                     # Re-check if we now have a single match
                     spans = self.find_all_declarations(source, target_path)
+                    # DEBUG
+                    import sys
+                    print(f"DEBUG: content_signature={content_signature!r}", file=sys.stderr)
+                    print(f"DEBUG: new target_path={target_path!r}", file=sys.stderr)
+                    print(f"DEBUG: len(spans) after signature filter = {len(spans)}", file=sys.stderr)
                 
                 if len(spans) > 1:
                     # Still ambiguous - require explicit disambiguation
