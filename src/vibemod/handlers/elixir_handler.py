@@ -120,6 +120,9 @@ class ElixirHandler(LanguageHandler):
                 break
         
         if args is None:
+            # defstruct with no args - use the keyword as the name
+            if keyword == 'defstruct':
+                return 'defstruct'
             return None
         
         if keyword == 'defmodule' or keyword in ('defprotocol', 'defimpl'):
@@ -131,6 +134,10 @@ class ElixirHandler(LanguageHandler):
                     # Nested module like MyApp.Users
                     return child.text.decode('utf-8')
             return None
+        
+        # defstruct has keyword args, not a function name
+        if keyword == 'defstruct':
+            return 'defstruct'
         
         # For def/defp/defmacro, first arg is the function call or name
         for child in self._get_children(args):
@@ -1094,7 +1101,61 @@ class ElixirHandler(LanguageHandler):
                 
                 return new_source
         
-        # For removals or new declarations, delegate to base class
+        # For new function declarations, insert inside the parent module
+        if not remove and content and target.is_function_target and target.module_path:
+            spans = self.find_all_declarations(source, target_path)
+            if not spans:
+                # New function - find the parent module and insert inside it
+                parent_module_path = '.'.join(target.module_path)
+                parent_span = self.find_declaration(source, parent_module_path)
+                
+                if parent_span:
+                    # Find the module's closing 'end'
+                    module_start, module_end = parent_span
+                    module_text = source[module_start:module_end]
+                    
+                    # Find the last 'end' in the module (which closes the defmodule)
+                    # We want to insert before it
+                    last_end_pos = module_text.rfind('\nend')
+                    if last_end_pos == -1:
+                        last_end_pos = module_text.rfind('end')
+                    
+                    if last_end_pos != -1:
+                        insert_pos = module_start + last_end_pos
+                        
+                        # Determine proper indentation (2 spaces for Elixir convention)
+                        indent = '  '
+                        
+                        # Re-indent content
+                        content_stripped = content.strip()
+                        content_lines = content_stripped.split('\n')
+                        reindented_lines = []
+                        for line in content_lines:
+                            if line.strip():
+                                reindented_lines.append(indent + line.lstrip())
+                            else:
+                                reindented_lines.append('')
+                        
+                        reindented_content = '\n'.join(reindented_lines)
+                        
+                        # Insert with proper spacing
+                        new_source = source[:insert_pos] + '\n\n' + reindented_content + source[insert_pos:]
+                        
+                        # Validate syntax
+                        syntax_error = self.validate_syntax(new_source, original_content=source)
+                        if syntax_error:
+                            if debug_dump_func:
+                                debug_dir = debug_dump_func(
+                                    file_path=file_path, target_path=target_path,
+                                    content=content, source_before=source,
+                                    source_after=new_source, error_message=syntax_error, remove=remove
+                                )
+                                raise ValueError(f'Modification would create syntactically invalid code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
+                            raise ValueError(f'Modification would create syntactically invalid code:\n{syntax_error}')
+                        
+                        return new_source
+        
+        # For removals or other cases, delegate to base class
         return super().modify_declaration(file_path, source, target_path, content, remove, debug_dump_func)
     
     # =========================================================================
