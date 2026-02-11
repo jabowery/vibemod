@@ -923,6 +923,55 @@ class ElixirHandler(LanguageHandler):
         
         return None
     
+    def _get_content_declaration_kind(self, content: str) -> Optional[str]:
+        """
+        Get the declaration kind (def, defstruct, defmodule, etc.) from content.
+        
+        Returns the keyword of the first declaration found, or None.
+        """
+        content = content.strip()
+        root = self._parse(content)
+        
+        for child in self._get_children(root):
+            if child.type == 'call':
+                keyword = self._get_call_keyword(child)
+                if keyword in ELIXIR_DEF_KEYWORDS:
+                    return keyword
+            elif child.type == 'unary_operator':
+                # Skip attributes
+                continue
+        
+        return None
+    
+    def _infer_target_from_content(self, module_target: str, content: str, content_kind: str) -> Optional[str]:
+        """
+        Infer the correct target path when a module is targeted but content is not a module.
+        
+        For example:
+        - Target: "MyModule.S", Content: "defstruct ..." -> "MyModule.S.defstruct"
+        - Target: "MyModule.S", Content: "def foo ..." -> "MyModule.S.foo"
+        """
+        content = content.strip()
+        root = self._parse(content)
+        
+        for child in self._get_children(root):
+            if child.type == 'call':
+                keyword = self._get_call_keyword(child)
+                if keyword == content_kind:
+                    if keyword == 'defstruct':
+                        # defstruct has no name, use the keyword itself
+                        return f"{module_target}.defstruct"
+                    else:
+                        # For def/defp etc., extract the function name
+                        name = self._extract_def_name(child, keyword)
+                        if name:
+                            prefix = 'defp:' if keyword in ('defp', 'defmacrop', 'defguardp') else ''
+                            return f"{module_target}.{prefix}{name}"
+            elif child.type == 'unary_operator':
+                continue
+        
+        return None
+    
     def modify_declaration(self, file_path: str, source: str, target_path: str, 
                           content: Optional[str], remove: bool, debug_dump_func=None) -> str:
         """
@@ -930,9 +979,22 @@ class ElixirHandler(LanguageHandler):
         
         Overrides base to handle Elixir-specific concerns:
         - Infers signature from content to disambiguate multi-clause functions
+        - Infers target from content when module target but non-module content
         - Preserves indentation when replacing function clauses
         """
         target = self.parse_target_path(target_path)
+        
+        # Check for module target with non-module content
+        # e.g., target is "MyModule.S" (a module) but content is "defstruct ..."
+        if target.is_module_target and not remove and content:
+            content_kind = self._get_content_declaration_kind(content)
+            if content_kind and content_kind not in ELIXIR_MODULE_KEYWORDS:
+                # Content is not a module (it's a def, defstruct, etc.)
+                # Infer the actual target by appending the content's kind/name
+                inferred_target = self._infer_target_from_content(target_path, content, content_kind)
+                if inferred_target:
+                    target_path = inferred_target
+                    target = self.parse_target_path(target_path)
         
         # Check for ambiguous multi-clause function matches
         if target.is_function_target and not remove and content:
@@ -950,11 +1012,6 @@ class ElixirHandler(LanguageHandler):
                     
                     # Re-check if we now have a single match
                     spans = self.find_all_declarations(source, target_path)
-                    # DEBUG
-                    import sys
-                    print(f"DEBUG: content_signature={content_signature!r}", file=sys.stderr)
-                    print(f"DEBUG: new target_path={target_path!r}", file=sys.stderr)
-                    print(f"DEBUG: len(spans) after signature filter = {len(spans)}", file=sys.stderr)
                 
                 if len(spans) > 1:
                     # Still ambiguous - require explicit disambiguation
