@@ -288,7 +288,7 @@ class ElixirHandler(LanguageHandler):
         # Tokenize and normalize
         result = []
         i = 0
-        
+        breakpoint()
         while i < len(sig):
             c = sig[i]
             
