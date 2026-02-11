@@ -303,8 +303,12 @@ class ElixirHandler(LanguageHandler):
             if c == ':':
                 result.append(c)
                 i += 1
-                # Read the atom name
+                # Read the atom name (can include ? or ! at the end)
                 while i < len(sig) and (sig[i].isalnum() or sig[i] == '_'):
+                    result.append(sig[i])
+                    i += 1
+                # Elixir atoms can end with ? or !
+                if i < len(sig) and sig[i] in '?!':
                     result.append(sig[i])
                     i += 1
                 continue
