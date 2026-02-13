@@ -174,6 +174,15 @@ def extract_command_blocks(file_content: str) -> List[CommandBlock]:
                 current_section.append(bl)
         if current_section:
             arguments.append(''.join(current_section))
+        # Tolerate trailing @@@@@@ that LLMs sometimes add
+        # This creates an empty final section - remove it
+        while arguments and not arguments[-1].strip():
+            arguments.pop()
+        # Also strip trailing @@@@@@ from the last non-empty section
+        if arguments:
+            last = arguments[-1]
+            if last.rstrip().endswith(SEP):
+                arguments[-1] = last.rstrip()[:-len(SEP)].rstrip() + '\n'
         blocks.append(CommandBlock(command=command, arguments=arguments))
     return blocks
 
