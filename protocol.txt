@@ -1,4 +1,4 @@
-Comply with these program modification standards:
+Comply with these vibemod program modification standards:
 
 Always refer to the current version of the relevant source code as your modification baseline.
 This implies that you must revise your belief about that baseline bsed on prior modifications as well as direct uploads/pastes.
