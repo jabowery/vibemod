@@ -930,6 +930,31 @@ class ElixirHandler(LanguageHandler):
         
         return None
     
+    def _extract_arity_from_content(self, content: str) -> Optional[int]:
+        """
+        Extract the function arity from replacement content.
+        
+        If content contains a function definition (def/defp/etc), extract
+        the arity to use for disambiguation.
+        
+        Returns:
+            Arity as integer, or None if not extractable
+        """
+        content = content.strip()
+        root = self._parse(content)
+        
+        for child in self._get_children(root):
+            if child.type == 'call':
+                keyword = self._get_call_keyword(child)
+                if keyword in ('def', 'defp', 'defmacro', 'defmacrop', 'defguard', 'defguardp'):
+                    # Found a function definition - extract its arity
+                    return self._extract_function_arity(child)
+            elif child.type == 'unary_operator':
+                # Skip attributes (@impl, @doc, etc.)
+                continue
+        
+        return None
+    
     def _get_content_declaration_kind(self, content: str) -> Optional[str]:
         """
         Get the declaration kind (def, defstruct, defmodule, etc.) from content.
@@ -1006,38 +1031,71 @@ class ElixirHandler(LanguageHandler):
         # Check for ambiguous multi-clause function matches
         if target.is_function_target and not remove and content:
             spans = self.find_all_declarations(source, target_path)
-            if len(spans) > 1 and target.signature_pattern is None and target.occurrence is None:
+            
+            # Check if content's arity matches the found function(s)
+            # If not, this should be treated as a new function, not a replacement
+            if spans and target.arity is None:
+                content_arity = self._extract_arity_from_content(content)
+                if content_arity is not None:
+                    # Check if any existing function has matching arity
+                    items = self._build_item_index(source)
+                    matches = self._find_matches(items, target)
+                    matching_arity = [m for m in matches if m.arity == content_arity]
+                    
+                    if not matching_arity:
+                        # No existing function with this arity - treat as new function insertion
+                        # Add arity to target to enable proper insertion
+                        target_path = f"{target_path}/{content_arity}"
+                        target = self.parse_target_path(target_path)
+                        spans = []  # Force new function path
+            
+            if len(spans) > 1 and target.signature_pattern is None and target.occurrence is None and target.arity is None:
                 # Multiple matches and no disambiguation provided
-                # Try to infer signature from the content
-                content_signature = self._extract_signature_from_content(content)
+                # First try to infer arity from the content
+                content_arity = self._extract_arity_from_content(content)
                 
-                if content_signature:
-                    # Use the inferred signature to disambiguate
-                    new_target_path = f"{target_path}@{content_signature}"
+                if content_arity is not None:
+                    # Use the inferred arity to disambiguate
+                    new_target_path = f"{target_path}/{content_arity}"
                     target = self.parse_target_path(new_target_path)
                     target_path = new_target_path
                     
                     # Re-check if we now have a single match
                     spans = self.find_all_declarations(source, target_path)
                 
+                # If still ambiguous, try signature
+                if len(spans) > 1 and target.signature_pattern is None:
+                    content_signature = self._extract_signature_from_content(content)
+                    
+                    if content_signature and content_signature != '_':
+                        # Use the inferred signature to disambiguate (but not if it's just '_')
+                        new_target_path = f"{target_path}@{content_signature}"
+                        target = self.parse_target_path(new_target_path)
+                        target_path = new_target_path
+                        
+                        # Re-check if we now have a single match
+                        spans = self.find_all_declarations(source, target_path)
+                
                 if len(spans) > 1:
                     # Still ambiguous - require explicit disambiguation
                     items = self._build_item_index(source)
-                    matches = self._find_matches(items, self.parse_target_path(target_path.split('@')[0]))
+                    base_target = target_path.split('@')[0]
+                    if '/' in base_target:
+                        base_target = base_target.rsplit('/', 1)[0]
+                    matches = self._find_matches(items, self.parse_target_path(base_target))
                     
                     # Build helpful error message
                     clause_info = []
                     for i, item in enumerate(matches, 1):
-                        if item.signature:
-                            clause_info.append(f"  @{i} or @{item.signature}")
-                        else:
-                            clause_info.append(f"  @{i}")
+                        arity_str = f"/{item.arity}" if item.arity is not None else ""
+                        sig_str = f" (sig: {item.signature})" if item.signature and item.signature != '_' else ""
+                        clause_info.append(f"  @{i}{arity_str}{sig_str}")
                     
                     raise ValueError(
                         f"Ambiguous target: '{target_path}' matches {len(matches)} function clauses.\n"
-                        f"Please disambiguate using occurrence (@N) or signature pattern (@pattern):\n"
+                        f"Please disambiguate using occurrence (@N) or arity (/N):\n"
                         + "\n".join(clause_info) + "\n\n"
-                        f"Example: {target_path}@1 or {target_path}@{matches[0].signature if matches[0].signature else '{{:pattern, _}}'}"
+                        f"Example: {target_path}@1 or {base_target}/{matches[0].arity if matches[0].arity else 0}"
                     )
         
         # For single matches or removals, handle with indentation preservation
@@ -1062,27 +1120,41 @@ class ElixirHandler(LanguageHandler):
                 content_lines = content_stripped.split('\n')
                 
                 # Re-indent content to match original
-                if original_indent and content_lines:
-                    # Find the base indentation of the content
-                    content_base_indent = ''
-                    for c in content_lines[0]:
-                        if c in ' \t':
-                            content_base_indent += c
-                        else:
-                            break
-                    
-                    # Re-indent all lines
-                    reindented_lines = []
-                    for line in content_lines:
-                        if line.strip():
-                            # Remove content's base indent and add original indent
-                            if line.startswith(content_base_indent):
-                                line = original_indent + line[len(content_base_indent):]
+                # Find the base indentation of the content (from first non-empty line)
+                content_base_indent = ''
+                for line in content_lines:
+                    if line.strip():
+                        for c in line:
+                            if c in ' \t':
+                                content_base_indent += c
                             else:
-                                line = original_indent + line.lstrip()
-                        reindented_lines.append(line)
-                    
-                    content = '\n'.join(reindented_lines)
+                                break
+                        break
+                
+                # Re-indent all lines relative to the original indent
+                reindented_lines = []
+                for line in content_lines:
+                    if line.strip():
+                        # Calculate this line's relative indent from base
+                        line_indent = ''
+                        for c in line:
+                            if c in ' \t':
+                                line_indent += c
+                            else:
+                                break
+                        
+                        # Relative indent = this line's indent - base indent
+                        if len(line_indent) >= len(content_base_indent):
+                            relative_indent = line_indent[len(content_base_indent):]
+                        else:
+                            relative_indent = ''
+                        
+                        # New line = original_indent + relative_indent + content
+                        reindented_lines.append(original_indent + relative_indent + line.lstrip())
+                    else:
+                        reindented_lines.append('')
+                
+                content = '\n'.join(reindented_lines)
                 
                 # Do the replacement directly (don't call super which would dedent)
                 new_source = source[:start] + content + source[end:]
