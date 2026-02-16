@@ -459,7 +459,7 @@ def apply_modspec(spec_file: str):
         try:
             run_git(['commit', '-m', desc])
         except RuntimeError as e:
-            if 'nothing to commit' not in str(e):
+            if 'nothing to commit' not in str(e) and 'nothing added to commit' not in str(e):
                 raise
     except Exception:
         run_git(['reset', '--hard', prior_commit])

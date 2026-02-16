@@ -1288,6 +1288,18 @@ class RustHandler(LanguageHandler):
         
         # Handle removal
         if remove:
+            # Special handling for use statement removal
+            if target.is_use_target:
+                use_span = self.find_use_statement(source, target.use_path)
+                if use_span is None:
+                    return source  # Not found, nothing to remove
+                start, end = use_span
+                before = source[:start].rstrip()
+                after = source[end:].lstrip()
+                new_source = before + '\n\n' + after
+                new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
+                return validate_and_return(new_source)
+            
             spans = self.find_all_declarations(source, target_path)
             if not spans:
                 return source

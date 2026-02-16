@@ -196,6 +196,24 @@ class ElixirHandler(LanguageHandler):
                     if subchild.type not in ('(', ')', ','):
                         count += 1
                 return count
+            elif child.type == 'binary_operator':
+                # def foo(a, b) when guard - the function call is on the left of the 'when'
+                left = child.child_by_field_name('left')
+                if left and left.type == 'call':
+                    call_args = None
+                    for subchild in self._get_children(left):
+                        if subchild.type == 'arguments':
+                            call_args = subchild
+                            break
+                    
+                    if call_args is None:
+                        return 0
+                    
+                    count = 0
+                    for subchild in self._get_children(call_args):
+                        if subchild.type not in ('(', ')', ','):
+                            count += 1
+                    return count
             elif child.type == 'identifier':
                 # def foo - no args
                 return 0
@@ -354,8 +372,8 @@ class ElixirHandler(LanguageHandler):
                     i += 1
                 continue
             
-            # Punctuation and operators - keep as is
-            if c in '{}[](),|=><+-*/_^&!?@#':
+            # Punctuation and operators - keep as is (but NOT underscore, it's part of identifiers)
+            if c in '{}[](),|=><+-*/^&!?@#':
                 result.append(c)
                 i += 1
                 continue
@@ -1029,6 +1047,7 @@ class ElixirHandler(LanguageHandler):
                     target = self.parse_target_path(target_path)
         
         # Check for ambiguous multi-clause function matches
+        force_insertion = False  # Flag to track when we explicitly want insertion
         if target.is_function_target and not remove and content:
             spans = self.find_all_declarations(source, target_path)
             
@@ -1048,6 +1067,178 @@ class ElixirHandler(LanguageHandler):
                         target_path = f"{target_path}/{content_arity}"
                         target = self.parse_target_path(target_path)
                         spans = []  # Force new function path
+                        force_insertion = True
+                    elif len(matching_arity) > 1:
+                        # Multiple clauses with same arity - check if content is a catch-all
+                        content_signature = self._extract_signature_from_content(content)
+                        if content_signature == '_':
+                            # Content is a catch-all clause - consolidate ALL clauses into one
+                            # Sort by position (ascending) to process in order
+                            matching_arity.sort(key=lambda m: m.start_byte)
+                            
+                            # Build new source by keeping everything EXCEPT the matched spans
+                            # Collect: [start_of_file...first_span_start] + [first_span_end...second_span_start] + ...
+                            parts = []
+                            prev_end = 0
+                            
+                            for m in matching_arity:
+                                # Keep content before this span
+                                if m.start_byte > prev_end:
+                                    parts.append(source[prev_end:m.start_byte].rstrip())
+                                prev_end = m.end_byte
+                            
+                            # Keep content after the last span
+                            if prev_end < len(source):
+                                parts.append(source[prev_end:].lstrip())
+                            
+                            # Join with double newlines
+                            new_source = '\n\n'.join(p for p in parts if p.strip())
+                            
+                            # Prepare the new content with standard 2-space indent
+                            content_stripped = content.strip()
+                            content_lines = content_stripped.split('\n')
+                            indent = '  '
+                            
+                            # Find base indent of content and re-indent
+                            content_base_indent = ''
+                            for line in content_lines:
+                                if line.strip():
+                                    for c in line:
+                                        if c in ' \t':
+                                            content_base_indent += c
+                                        else:
+                                            break
+                                    break
+                            
+                            reindented_lines = []
+                            for line in content_lines:
+                                if line.strip():
+                                    line_indent = ''
+                                    for c in line:
+                                        if c in ' \t':
+                                            line_indent += c
+                                        else:
+                                            break
+                                    relative = line_indent[len(content_base_indent):] if len(line_indent) >= len(content_base_indent) else ''
+                                    reindented_lines.append(indent + relative + line.lstrip())
+                                else:
+                                    reindented_lines.append('')
+                            
+                            reindented_content = '\n'.join(reindented_lines)
+                            
+                            # Insert before the module's closing 'end'
+                            end_match = re.search(r'\nend\s*$', new_source)
+                            if end_match:
+                                insert_pos = end_match.start()
+                                new_source = new_source[:insert_pos].rstrip() + '\n\n' + reindented_content + '\n' + new_source[insert_pos:]
+                            else:
+                                new_source = new_source.rstrip() + '\n\n' + reindented_content + '\n'
+                            
+                            new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
+                            
+                            syntax_error = self.validate_syntax(new_source, original_content=source)
+                            if syntax_error:
+                                if debug_dump_func:
+                                    debug_dir = debug_dump_func(
+                                        file_path=file_path, target_path=target_path,
+                                        content=content, source_before=source,
+                                        source_after=new_source, error_message=syntax_error, remove=remove
+                                    )
+                                    raise ValueError(f'Modification would create syntactically invalid code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
+                                raise ValueError(f'Modification would create syntactically invalid code:\n{syntax_error}')
+                            
+                            return new_source
+                        else:
+                            # Content has a specific signature - try to match an existing clause
+                            # Find clause(s) that match this signature
+                            matching_sig = [m for m in matching_arity 
+                                          if self._signatures_match(m.signature, content_signature)]
+                            
+                            if len(matching_sig) == 1:
+                                # Found exactly one match - update target to use signature
+                                new_target_path = f"{target_path}/{content_arity}@{content_signature}"
+                                target = self.parse_target_path(new_target_path)
+                                target_path = new_target_path
+                                spans = [(matching_sig[0].start_byte, matching_sig[0].end_byte)]
+                            elif len(matching_sig) == 0:
+                                # No existing clause with this signature - treat as new clause to insert
+                                target_path = f"{target_path}/{content_arity}"
+                                target = self.parse_target_path(target_path)
+                                spans = []  # Force new function insertion path
+                                # Set flag to prevent re-query of spans later
+                                force_insertion = True
+                            else:
+                                # Multiple clauses with same signature - this is de-duplication
+                                # Replace all of them with the single new clause
+                                matching_sig.sort(key=lambda m: m.start_byte)
+                                
+                                # Build new source by removing all matching clauses
+                                parts = []
+                                prev_end = 0
+                                
+                                for m in matching_sig:
+                                    if m.start_byte > prev_end:
+                                        parts.append(source[prev_end:m.start_byte].rstrip())
+                                    prev_end = m.end_byte
+                                
+                                if prev_end < len(source):
+                                    parts.append(source[prev_end:].lstrip())
+                                
+                                new_source = '\n\n'.join(p for p in parts if p.strip())
+                                
+                                # Re-indent the new content
+                                content_stripped = content.strip()
+                                content_lines = content_stripped.split('\n')
+                                indent = '  '
+                                
+                                content_base_indent = ''
+                                for line in content_lines:
+                                    if line.strip():
+                                        for c in line:
+                                            if c in ' \t':
+                                                content_base_indent += c
+                                            else:
+                                                break
+                                        break
+                                
+                                reindented_lines = []
+                                for line in content_lines:
+                                    if line.strip():
+                                        line_indent = ''
+                                        for c in line:
+                                            if c in ' \t':
+                                                line_indent += c
+                                            else:
+                                                break
+                                        relative = line_indent[len(content_base_indent):] if len(line_indent) >= len(content_base_indent) else ''
+                                        reindented_lines.append(indent + relative + line.lstrip())
+                                    else:
+                                        reindented_lines.append('')
+                                
+                                reindented_content = '\n'.join(reindented_lines)
+                                
+                                # Insert before the module's closing 'end'
+                                end_match = re.search(r'\nend\s*$', new_source)
+                                if end_match:
+                                    insert_pos = end_match.start()
+                                    new_source = new_source[:insert_pos].rstrip() + '\n\n' + reindented_content + '\n' + new_source[insert_pos:]
+                                else:
+                                    new_source = new_source.rstrip() + '\n\n' + reindented_content + '\n'
+                                
+                                new_source = re.sub(r'\n\n\n+', '\n\n', new_source)
+                                
+                                syntax_error = self.validate_syntax(new_source, original_content=source)
+                                if syntax_error:
+                                    if debug_dump_func:
+                                        debug_dir = debug_dump_func(
+                                            file_path=file_path, target_path=target_path,
+                                            content=content, source_before=source,
+                                            source_after=new_source, error_message=syntax_error, remove=remove
+                                        )
+                                        raise ValueError(f'Modification would create syntactically invalid code:\n{syntax_error}\n\nDebug files written to: {debug_dir}')
+                                    raise ValueError(f'Modification would create syntactically invalid code:\n{syntax_error}')
+                                
+                                return new_source
             
             if len(spans) > 1 and target.signature_pattern is None and target.occurrence is None and target.arity is None:
                 # Multiple matches and no disambiguation provided
@@ -1100,7 +1291,9 @@ class ElixirHandler(LanguageHandler):
         
         # For single matches or removals, handle with indentation preservation
         if not remove and content:
-            spans = self.find_all_declarations(source, target_path)
+            # Only re-query spans if we didn't explicitly request insertion
+            if not force_insertion:
+                spans = self.find_all_declarations(source, target_path)
             if spans:
                 # Preserve indentation from original
                 start, end = spans[0]
@@ -1175,8 +1368,10 @@ class ElixirHandler(LanguageHandler):
         
         # For new function declarations, insert inside the parent module
         if not remove and content and target.is_function_target and target.module_path:
-            spans = self.find_all_declarations(source, target_path)
-            if not spans:
+            # If force_insertion is set, we already know spans should be empty
+            if not force_insertion:
+                spans = self.find_all_declarations(source, target_path)
+            if not spans or force_insertion:
                 # New function - find the parent module and insert inside it
                 parent_module_path = '.'.join(target.module_path)
                 parent_span = self.find_declaration(source, parent_module_path)

@@ -6,6 +6,13 @@ MyApp.Users → module
 MyApp.Users.SubModule → nested module
 MyApp.Users.get_user → function in module Users
 
+The first line of the content of a declaration is taken as a matching signature as follows:
+Scenario                            Example                         Behavior
+Catch-all (_)                       def handle_call(msg, from, s)   Consolidates ALL clauses
+Specific signature, 1 match         def handle_call(:reset, _, s)   Replaces that clause
+Specific signature, 0 matches       def handle_call(:status, _, s)  Inserts new clause
+Specific signature, N duplicates    5× do_reply({:call, _}, val)    De-duplicates to 1
+
 Features:
 
 Attaches @doc and similar attributes to functions
